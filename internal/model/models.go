@@ -91,6 +91,9 @@ type SystemStatus struct {
 	IsDiscoveryRunning   bool          `json:"is_discovery_running"`
 	IsVulnRunning        bool          `json:"is_vuln_running"`
 	Capabilities         *Capabilities `json:"capabilities"`
+	IngestEventsTotal    int64         `json:"ingest_events_total"`
+	DetectLagMsP95       float64       `json:"detect_lag_ms_p95"`
+	IncidentsOpen        int           `json:"incidents_open"`
 }
 
 // ExportData represents the complete network sentinel snapshot for JSON export.

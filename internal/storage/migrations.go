@@ -186,6 +186,41 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 4,
+			up: func(tx *sql.Tx) error {
+				queries := []string{
+					`CREATE TABLE IF NOT EXISTS incidents(
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						device_id INTEGER REFERENCES devices(id) ON DELETE CASCADE,
+						agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+						rule_id TEXT NOT NULL,
+						ruleset_version TEXT NOT NULL,
+						title TEXT NOT NULL,
+						severity TEXT NOT NULL,
+						score REAL NOT NULL,
+						mitre_tactic TEXT,
+						mitre_technique TEXT,
+						pid_root INTEGER,
+						dedupe_key TEXT NOT NULL,
+						first_seen_at DATETIME NOT NULL,
+						last_seen_at DATETIME NOT NULL,
+						hit_count INTEGER NOT NULL DEFAULT 1,
+						evidence_event_ids TEXT NOT NULL,
+						status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','acknowledged','closed'))
+					);`,
+					`CREATE INDEX IF NOT EXISTS idx_incidents_dedupe ON incidents(dedupe_key, last_seen_at);`,
+					`CREATE INDEX IF NOT EXISTS idx_incidents_device_time ON incidents(device_id, last_seen_at);`,
+					`CREATE INDEX IF NOT EXISTS idx_incidents_status_time ON incidents(status, last_seen_at);`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 4 query (%s): %w", q, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 }
 

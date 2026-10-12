@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/model"
@@ -178,6 +181,12 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		Capabilities:         caps,
 	}
 
+	if s.engine != nil {
+		status.IngestEventsTotal = s.engine.IngestEventsTotal()
+		status.DetectLagMsP95 = s.engine.DetectLagMsP95()
+		status.IncidentsOpen = s.engine.OpenIncidentsCount(r.Context())
+	}
+
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -227,4 +236,125 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, timeline)
+}
+
+// handleGetIncidents retrieves security incidents filtered by query parameters.
+func (s *Server) handleGetIncidents(w http.ResponseWriter, r *http.Request) {
+	filter := model.IncidentFilter{
+		Status:   r.URL.Query().Get("status"),
+		Severity: r.URL.Query().Get("severity"),
+	}
+
+	if devIDStr := r.URL.Query().Get("device_id"); devIDStr != "" {
+		if id, err := strconv.ParseInt(devIDStr, 10, 64); err == nil {
+			filter.DeviceID = &id
+		}
+	}
+	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
+		if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			tUTC := t.UTC()
+			filter.From = &tUTC
+		}
+	}
+	if toStr := r.URL.Query().Get("to"); toStr != "" {
+		if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+			tUTC := t.UTC()
+			filter.To = &tUTC
+		}
+	}
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if lim, err := strconv.Atoi(limitStr); err == nil {
+			filter.Limit = lim
+		}
+	}
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if off, err := strconv.Atoi(offsetStr); err == nil {
+			filter.Offset = off
+		}
+	}
+
+	incidents, err := s.storage.GetIncidents(r.Context(), filter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, incidents)
+}
+
+// handleGetIncidentByID retrieves details for a single incident, including evidence event records.
+func (s *Server) handleGetIncidentByID(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 3 {
+			idStr = parts[2]
+		}
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid incident id"})
+		return
+	}
+
+	inc, err := s.storage.GetIncidentByID(r.Context(), id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, inc)
+}
+
+// handlePatchIncident updates an incident's triage status (open, acknowledged, closed).
+func (s *Server) handlePatchIncident(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) >= 3 {
+			idStr = parts[2]
+		}
+	}
+
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid incident id"})
+		return
+	}
+
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+
+	req.Status = strings.ToLower(strings.TrimSpace(req.Status))
+	if req.Status != "open" && req.Status != "acknowledged" && req.Status != "closed" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be one of: open, acknowledged, closed"})
+		return
+	}
+
+	if err := s.storage.UpdateIncidentStatus(r.Context(), id, req.Status); err != nil {
+		if err == sql.ErrNoRows {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "incident not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	inc, err := s.storage.GetIncidentByID(r.Context(), id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"id": id, "status": req.Status})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, inc)
 }

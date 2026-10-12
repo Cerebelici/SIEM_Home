@@ -27,6 +27,7 @@ type Dispatcher struct {
 	shards    []*shard
 	numShards int
 	store     *storage.Storage
+	processor func(events []model.NormalizedEvent)
 	wg        sync.WaitGroup
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -86,7 +87,15 @@ func (d *Dispatcher) runShardWorker(idx int, s *shard) {
 	}
 }
 
+// SetProcessor sets the downstream handler for batches of normalized events.
+func (d *Dispatcher) SetProcessor(fn func(events []model.NormalizedEvent)) {
+	d.processor = fn
+}
+
 func (d *Dispatcher) processItem(item DispatchItem) {
+	if d.processor != nil && len(item.Events) > 0 {
+		d.processor(item.Events)
+	}
 	// Mark batch as processed
 	if d.store != nil && item.BatchID > 0 {
 		_ = d.store.MarkBatchProcessed(context.Background(), item.BatchID)

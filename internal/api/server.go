@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/detect"
 	"github.com/gr0gu/cerberus/internal/ingest"
 	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/scheduler"
@@ -25,6 +26,7 @@ type Server struct {
 	startTime    time.Time
 	capabilities *model.Capabilities
 	dispatcher   *ingest.Dispatcher
+	engine       *detect.Engine
 }
 
 // NewServer configures routes, middleware, and returns a new Server instance.
@@ -34,7 +36,13 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 		c = caps[0]
 	}
 
+	engine := detect.NewEngine(store)
+	engine.Start(context.Background())
+
 	dispatcher := ingest.NewDispatcher(store, cfg.IngestShards)
+	dispatcher.SetProcessor(func(events []model.NormalizedEvent) {
+		_ = engine.ProcessSync(events)
+	})
 	dispatcher.Start(context.Background())
 	ingestHandler := ingest.NewHandler(cfg, store, dispatcher)
 
@@ -45,6 +53,7 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 		startTime:    time.Now().UTC(),
 		capabilities: c,
 		dispatcher:   dispatcher,
+		engine:       engine,
 	}
 
 	mux := http.NewServeMux()
@@ -60,6 +69,11 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 	mux.HandleFunc("POST /api/scans/vulnerability/trigger", s.handleTriggerVuln)
 	mux.HandleFunc("GET /api/status", s.handleGetStatus)
 	mux.HandleFunc("GET /api/export/json", s.handleExportJSON)
+
+	// Threat Incidents API (DEV-03)
+	mux.HandleFunc("GET /api/incidents", s.handleGetIncidents)
+	mux.HandleFunc("GET /api/incidents/{id}", s.handleGetIncidentByID)
+	mux.HandleFunc("PATCH /api/incidents/{id}", s.handlePatchIncident)
 
 	// Agent Telemetry Ingestion API (DEV-01)
 	mux.HandleFunc("POST /api/v1/agent/enroll", ingestHandler.HandleEnroll)
@@ -119,6 +133,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	log.Println("[HTTP Server] Draining and shutting down...")
 	if s.dispatcher != nil {
 		_ = s.dispatcher.Stop(ctx)
+	}
+	if s.engine != nil {
+		_ = s.engine.Stop(ctx)
 	}
 	return s.server.Shutdown(ctx)
 }
