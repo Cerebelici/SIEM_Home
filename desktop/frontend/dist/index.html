@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cerberus Sentinel</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #0d1117;
+      color: #c9d1d9;
+    }
+    h1 {
+      color: #58a6ff;
+      margin-top: 0;
+    }
+    pre {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 16px;
+      overflow: auto;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #238636;
+      color: #ffffff;
+      font-weight: bold;
+      font-size: 12px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Cerberus Sentinel</h1>
+  <div class="badge" id="mode-badge">Connecting...</div>
+  <h3>System Status Telemetry</h3>
+  <pre id="status-json">Loading status...</pre>
+
+  <script>
+    async function updateStatus() {
+      try {
+        if (window.go && window.go.main && window.go.main.Bridge) {
+          const status = await window.go.main.Bridge.Status();
+          document.getElementById('status-json').textContent = JSON.stringify(status, null, 2);
+          const badge = document.getElementById('mode-badge');
+          if (status.capabilities) {
+            badge.textContent = 'Mode: ' + status.capabilities.effective_mode + ' | Version: ' + status.capabilities.nmap_version;
+          } else {
+            badge.textContent = 'Mode: active';
+          }
+        } else {
+          document.getElementById('status-json').textContent = 'Waiting for Wails runtime bridge...';
+        }
+      } catch (err) {
+        document.getElementById('status-json').textContent = 'Error fetching status: ' + err;
+      }
+    }
+
+    setInterval(updateStatus, 5000);
+    window.addEventListener('load', updateStatus);
+  </script>
+</body>
+</html>

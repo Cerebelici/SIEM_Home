@@ -154,6 +154,15 @@ func (s *Server) Start() error {
 	return nil
 }
 
+// Serve runs the HTTP server on an existing net.Listener (blocking).
+func (s *Server) Serve(ln net.Listener) error {
+	log.Printf("[HTTP Server] Serving on http://%s", ln.Addr().String())
+	if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("http server failed: %w", err)
+	}
+	return nil
+}
+
 // Shutdown gracefully stops the HTTP listener.
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Println("[HTTP Server] Draining and shutting down...")

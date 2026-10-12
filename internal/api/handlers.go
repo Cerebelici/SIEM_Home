@@ -364,16 +364,19 @@ func (s *Server) handleTriggerVuln(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetStatus returns system health, uptime, counts, and scheduler state.
-func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
-	totalDevs, activeDevs, totalSvcs, totalVulns, err := s.storage.GetCounts(r.Context())
+// GetStatus evaluates and returns the full system status metrics.
+func (s *Server) GetStatus(ctx context.Context) (model.SystemStatus, error) {
+	totalDevs, activeDevs, totalSvcs, totalVulns, err := s.storage.GetCounts(ctx)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return model.SystemStatus{}, err
 	}
 
 	uptimeDuration := time.Since(s.startTime)
-	discNext, vulnNext, discRunning, vulnRunning := s.scheduler.GetNextRuns()
+	var discNext, vulnNext *time.Time
+	var discRunning, vulnRunning bool
+	if s.scheduler != nil {
+		discNext, vulnNext, discRunning, vulnRunning = s.scheduler.GetNextRuns()
+	}
 
 	caps := s.capabilities
 	if caps == nil {
@@ -400,15 +403,26 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	if s.engine != nil {
 		status.IngestEventsTotal = s.engine.IngestEventsTotal()
 		status.DetectLagMsP95 = s.engine.DetectLagMsP95()
-		status.IncidentsOpen = s.engine.OpenIncidentsCount(r.Context())
+		status.IncidentsOpen = s.engine.OpenIncidentsCount(ctx)
 	}
 
 	if s.postureService != nil {
-		report, err := s.postureService.Compute(r.Context())
+		report, err := s.postureService.Compute(ctx)
 		if err == nil && report != nil {
 			status.FleetScore = report.FleetScore
 			status.PostureStatus = report.PostureStatus
 		}
+	}
+
+	return status, nil
+}
+
+// handleGetStatus returns system health, uptime, counts, and scheduler state.
+func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.GetStatus(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, status)

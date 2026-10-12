@@ -130,4 +130,38 @@ Run unit and integration test suites:
 
 ```bash
 go test -v ./...
+go test -race ./...
+```
+
+---
+
+## Building & Desktop Application
+
+Cerberus Sentinel can run either as a headless background daemon or as a desktop GUI application powered by Wails v2.
+
+### Build Targets
+
+```bash
+# Build headless background sentinel binary (CGO-free)
+make build-headless
+
+# Build Wails desktop application (Linux/macOS)
+make build-desktop
+
+# Apply raw socket capability to nmap for privileged mode without root
+make setcap-nmap
+```
+
+### Desktop Application Dependencies (Linux / Ubuntu 24.04)
+
+To build the Wails v2 desktop application on Linux, ensure the following system packages and Wails CLI are installed:
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  libgtk-3-dev \
+  libwebkit2gtk-4.1-dev \
+  pkg-config \
+  build-essential
+
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
 ```
