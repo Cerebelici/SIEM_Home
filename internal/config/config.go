@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -19,6 +20,10 @@ type Config struct {
 	ForceUnprivileged     bool
 	ScanTimeout           time.Duration
 	SeedMockData          bool
+	EnrollToken           string
+	IngestMaxBody         int64
+	IngestShards          int
+	EventRetention        time.Duration
 }
 
 // Load returns configuration populated with defaults and overridden by environment variables.
@@ -35,6 +40,10 @@ func Load() *Config {
 		ForceUnprivileged:     getEnvBool("CERBERUS_UNPRIVILEGED", false),
 		ScanTimeout:           getEnvDuration("CERBERUS_SCAN_TIMEOUT", 15*time.Minute),
 		SeedMockData:          getEnvBool("CERBERUS_MOCK_DATA", false),
+		EnrollToken:           getEnv("CERBERUS_ENROLL_TOKEN", ""),
+		IngestMaxBody:         getEnvInt64("CERBERUS_INGEST_MAX_BODY", 1048576),
+		IngestShards:          getEnvInt("CERBERUS_INGEST_SHARDS", runtime.GOMAXPROCS(0)),
+		EventRetention:        getEnvDuration("CERBERUS_EVENT_RETENTION", 168*time.Hour),
 	}
 
 	return cfg
@@ -50,6 +59,15 @@ func getEnv(key, defaultVal string) string {
 func getEnvInt(key string, defaultVal int) int {
 	if val, ok := os.LookupEnv(key); ok && val != "" {
 		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
+
+func getEnvInt64(key string, defaultVal int64) int64 {
+	if val, ok := os.LookupEnv(key); ok && val != "" {
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
 			return i
 		}
 	}

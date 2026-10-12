@@ -203,6 +203,16 @@ tags:
     x-page-title: Status & Export
     x-page-description: Sentinel liveness, scheduler metrics, and complete data export.
     x-page-icon: database
+  - name: agents
+    x-parent: system-group
+    x-page-title: Agents
+    x-page-description: Register, inspect, and revoke eBPF endpoint agents.
+    x-page-icon: user-secret
+  - name: telemetry
+    x-parent: system-group
+    x-page-title: Agent Telemetry
+    x-page-description: High-throughput ingestion and querying of kernel execution, network, and file events.
+    x-page-icon: wave-pulse
 paths:
   /api/status:
     get:
@@ -826,6 +836,198 @@ paths:
             import requests
             print(requests.get('http://localhost:8080/health').json())
 
+  /api/v1/agent/enroll:
+    post:
+      summary: Enroll agent and issue authentication token
+      description: Validates enrollment token against server configuration and registers the agent, rotating its token if re-enrolled.
+      tags:
+        - agents
+      operationId: enrollAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentEnrollRequest'
+      responses:
+        '201':
+          description: Agent enrolled successfully and bearer token returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnrollResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Enrollment is disabled or token is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agent/telemetry:
+    post:
+      summary: Ingest agent telemetry event batch
+      description: Ingests compressed or uncompressed eBPF telemetry batches with validation, deduplication, and sharding.
+      tags:
+        - telemetry
+      operationId: ingestTelemetry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TelemetryBatch'
+      responses:
+        '202':
+          description: Telemetry batch accepted or acknowledged duplicate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TelemetryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Agent credentials missing, invalid, or revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Payload size exceeds limit (1 MiB raw or 4 MiB decompressed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Backlog threshold exceeded.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Recommended backoff interval in seconds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/agents:
+    get:
+      summary: List registered endpoint agents
+      description: Returns inventory of active, revoked, or conflicting eBPF agents.
+      tags:
+        - agents
+      operationId: listAgents
+      responses:
+        '200':
+          description: List of registered agents.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  agents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentRecord'
+
+  /api/agents/{id}:
+    get:
+      summary: Retrieve agent record
+      description: Returns detailed metadata and network interfaces for an agent.
+      tags:
+        - agents
+      operationId: getAgentByID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent details found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRecord'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Revoke an agent
+      description: Marks agent status as revoked, disallowing future telemetry ingestion.
+      tags:
+        - agents
+      operationId: revokeAgent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: revoked
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/agent-events:
+    get:
+      summary: Query historical agent events
+      description: Search ingested telemetry events with filters by agent, event type, and time bounds.
+      tags:
+        - telemetry
+      operationId: listAgentEvents
+      parameters:
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Matching normalized telemetry events.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NormalizedEvent'
+
 components:
   schemas:
     Device:
@@ -1442,6 +1644,214 @@ components:
           format: int64
           description: Time gap in seconds between the end of the previous sample and the start of the next sample during state transitions.
           example: 300
+
+    AgentEnrollRequest:
+      type: object
+      required:
+        - agent_id
+        - hostname
+        - enrollment_token
+      properties:
+        agent_id:
+          type: string
+          example: 018f2f45-9831-7bc2-965a-06399a9cfb00
+        hostname:
+          type: string
+          example: prod-web-01
+        enrollment_token:
+          type: string
+          example: secret-token
+
+    AgentEnrollResponse:
+      type: object
+      required:
+        - agent_token
+      properties:
+        agent_token:
+          type: string
+          description: Bearer token for agent authentication.
+          example: e1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+
+    TelemetryBatch:
+      type: object
+      required:
+        - schema_version
+        - agent
+        - batch
+        - events
+      properties:
+        schema_version:
+          type: integer
+          example: 1
+        agent:
+          type: object
+          required:
+            - agent_id
+            - boot_id
+            - hostname
+          properties:
+            agent_id:
+              type: string
+            boot_id:
+              type: string
+            hostname:
+              type: string
+            agent_version:
+              type: string
+            kernel:
+              type: string
+            interfaces:
+              type: array
+              items:
+                $ref: '#/components/schemas/AgentInterface'
+        batch:
+          type: object
+          required:
+            - seq
+            - sent_at
+          properties:
+            seq:
+              type: integer
+            sent_at:
+              type: string
+              format: date-time
+            dropped_since_last:
+              type: integer
+        events:
+          type: array
+          items:
+            type: object
+
+    TelemetryResponse:
+      type: object
+      properties:
+        accepted:
+          type: integer
+          example: 8
+        rejected:
+          type: integer
+          example: 0
+        duplicate:
+          type: boolean
+          example: false
+
+    AgentInterface:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          example: eth0
+        mac:
+          type: string
+          example: 02:42:ac:11:00:02
+        ipv4:
+          type: array
+          items:
+            type: string
+          example: ["172.17.0.2"]
+        ipv6:
+          type: array
+          items:
+            type: string
+          example: ["fe80::42:acff:fe11:2"]
+
+    AgentRecord:
+      type: object
+      required:
+        - agent_id
+        - hostname
+        - enrolled_at
+        - status
+      properties:
+        agent_id:
+          type: string
+        device_id:
+          type: integer
+          nullable: true
+        hostname:
+          type: string
+        agent_version:
+          type: string
+        kernel:
+          type: string
+        boot_id:
+          type: string
+        enrolled_at:
+          type: string
+          format: date-time
+        last_heartbeat:
+          type: string
+          format: date-time
+          nullable: true
+        events_dropped_total:
+          type: integer
+        status:
+          type: string
+          enum: [active, revoked, conflict]
+        interfaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentInterface'
+
+    NormalizedEvent:
+      type: object
+      required:
+        - id
+        - batch_id
+        - agent_id
+        - type
+        - category
+        - action
+        - ts
+      properties:
+        id:
+          type: integer
+        batch_id:
+          type: integer
+        agent_id:
+          type: string
+        device_id:
+          type: integer
+          nullable: true
+        type:
+          type: string
+        category:
+          type: string
+        action:
+          type: string
+        ts:
+          type: string
+          format: date-time
+        pid:
+          type: integer
+        ppid:
+          type: integer
+        uid:
+          type: integer
+        gid:
+          type: integer
+        comm:
+          type: string
+        image:
+          type: string
+        dst_ip:
+          type: string
+        dst_port:
+          type: integer
+        target_pid:
+          type: integer
+        path:
+          type: string
+        command:
+          type: string
+        data_json:
+          type: string
+        agent_rule:
+          type: string
+        agent_severity:
+          type: string
 
     HealthResponse:
       type: object

@@ -113,6 +113,79 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 3,
+			up: func(tx *sql.Tx) error {
+				queries := []string{
+					`CREATE TABLE IF NOT EXISTS agents(
+						agent_id TEXT PRIMARY KEY,
+						device_id INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+						hostname TEXT NOT NULL,
+						agent_version TEXT,
+						kernel TEXT,
+						token_sha256 BLOB NOT NULL,
+						boot_id TEXT,
+						enrolled_at DATETIME NOT NULL,
+						last_heartbeat DATETIME,
+						events_dropped_total INTEGER NOT NULL DEFAULT 0,
+						status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','revoked','conflict'))
+					);`,
+					`CREATE TABLE IF NOT EXISTS agent_interfaces(
+						agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+						name TEXT NOT NULL,
+						mac TEXT,
+						ip TEXT NOT NULL,
+						updated_at DATETIME NOT NULL,
+						PRIMARY KEY(agent_id, name, ip)
+					);`,
+					`CREATE INDEX IF NOT EXISTS idx_agent_interfaces_ip ON agent_interfaces(ip);`,
+					`CREATE TABLE IF NOT EXISTS agent_batches(
+						id INTEGER PRIMARY KEY,
+						agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+						boot_id TEXT NOT NULL,
+						seq INTEGER NOT NULL,
+						received_at DATETIME NOT NULL,
+						event_count INTEGER NOT NULL,
+						rejected_count INTEGER NOT NULL DEFAULT 0,
+						dropped_reported INTEGER NOT NULL DEFAULT 0,
+						detect_pending INTEGER NOT NULL DEFAULT 1,
+						UNIQUE(agent_id, boot_id, seq)
+					);`,
+					`CREATE TABLE IF NOT EXISTS agent_events(
+						id INTEGER PRIMARY KEY,
+						batch_id INTEGER NOT NULL REFERENCES agent_batches(id) ON DELETE CASCADE,
+						agent_id TEXT NOT NULL,
+						device_id INTEGER,
+						event_type TEXT NOT NULL,
+						category TEXT NOT NULL,
+						ts DATETIME NOT NULL,
+						pid INTEGER,
+						ppid INTEGER,
+						uid INTEGER,
+						gid INTEGER,
+						comm TEXT,
+						image TEXT,
+						dst_ip TEXT,
+						dst_port INTEGER,
+						target_pid INTEGER,
+						path TEXT,
+						command TEXT,
+						data_json TEXT NOT NULL,
+						agent_rule TEXT,
+						agent_severity TEXT
+					);`,
+					`CREATE INDEX IF NOT EXISTS idx_agent_events_agent_ts ON agent_events(agent_id, ts);`,
+					`CREATE INDEX IF NOT EXISTS idx_agent_events_type_ts ON agent_events(event_type, ts);`,
+					`CREATE INDEX IF NOT EXISTS idx_agent_batches_pending ON agent_batches(detect_pending) WHERE detect_pending = 1;`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 3 query (%s): %w", q, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 }
 
