@@ -5,17 +5,68 @@ import "time"
 // Device represents a network host discovered by Cerberus.
 type Device struct {
 	ID                   int64           `json:"id"`
-	IP                   string          `json:"ip"`
+	CurrentIP            string          `json:"current_ip"`
+	IP                   string          `json:"ip"` // Backward-compatible alias for CurrentIP
 	MAC                  string          `json:"mac,omitempty"`
 	Hostname             string          `json:"hostname,omitempty"`
 	Vendor               string          `json:"vendor,omitempty"`
 	Status               string          `json:"status"` // "up" or "down"
 	FirstSeen            time.Time       `json:"first_seen"`
 	LastSeen             time.Time       `json:"last_seen"`
+	AssetUID             string          `json:"asset_uid"`
+	MACIsRandom          bool            `json:"mac_is_random"`
+	PortProfileHash      string          `json:"port_profile_hash,omitempty"`
+	Managed              bool            `json:"managed"`
+	IdentityConfidence   float64         `json:"identity_confidence"`
+	Label                string          `json:"label,omitempty"`
+	Criticality          string          `json:"criticality"` // "low", "normal", "high", "critical"
+	Notes                string          `json:"notes,omitempty"`
 	ServicesCount        int             `json:"services_count"`
 	VulnerabilitiesCount int             `json:"vulnerabilities_count"`
 	Services             []Service       `json:"services,omitempty"`
 	Vulnerabilities      []Vulnerability `json:"vulnerabilities,omitempty"`
+}
+
+// DeviceAddress records an IP lease / network attachment history for a device.
+type DeviceAddress struct {
+	ID        int64     `json:"id"`
+	DeviceID  int64     `json:"device_id"`
+	IP        string    `json:"ip"`
+	MAC       string    `json:"mac,omitempty"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Closed    bool      `json:"closed"`
+}
+
+// IdentityDecision stores deterministic resolution audit logs.
+type IdentityDecision struct {
+	ID               int64     `json:"id"`
+	ObservedAt       time.Time `json:"observed_at"`
+	IP               string    `json:"ip"`
+	MAC              string    `json:"mac,omitempty"`
+	Hostname         string    `json:"hostname,omitempty"`
+	ChosenDeviceID   *int64    `json:"chosen_device_id,omitempty"`
+	Score            float64   `json:"score"`
+	RunnerUpDeviceID *int64    `json:"runner_up_device_id,omitempty"`
+	RunnerUpScore    float64   `json:"runner_up_score"`
+	Reason           string    `json:"reason"`
+}
+
+// MergeDeviceRequest parameters for POST /api/devices/{id}/merge.
+type MergeDeviceRequest struct {
+	SourceID int64 `json:"source_id"`
+}
+
+// SplitDeviceRequest parameters for POST /api/devices/{id}/split.
+type SplitDeviceRequest struct {
+	AddressID int64 `json:"address_id"`
+}
+
+// UpdateDeviceRequest parameters for PATCH /api/devices/{id}.
+type UpdateDeviceRequest struct {
+	Label       *string `json:"label,omitempty"`
+	Criticality *string `json:"criticality,omitempty"`
+	Notes       *string `json:"notes,omitempty"`
 }
 
 // Service represents a network service running on an open port of a device.

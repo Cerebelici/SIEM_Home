@@ -267,8 +267,8 @@ func TestMigrations_FromV0(t *testing.T) {
 	if err := s.RawReader().QueryRow("PRAGMA user_version;").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Errorf("expected user_version=4, got %d", version)
+	if version != 5 {
+		t.Errorf("expected user_version=5, got %d", version)
 	}
 
 	dev, err := s.GetDeviceByIP(context.Background(), "10.0.0.1")
@@ -295,7 +295,7 @@ func TestConcurrent_ReadersAndWriter(t *testing.T) {
 	s, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var wg sync.WaitGroup

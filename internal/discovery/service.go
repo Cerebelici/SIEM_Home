@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/identity"
 	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/storage"
@@ -20,6 +21,7 @@ type Service struct {
 	cfg         *config.Config
 	storage     *storage.Storage
 	scanner     *scanner.Scanner
+	matcher     *identity.Matcher
 	onNewDevice OnNewDeviceFunc
 }
 
@@ -29,6 +31,7 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner, onNew
 		cfg:         cfg,
 		storage:     store,
 		scanner:     scn,
+		matcher:     identity.NewMatcher(store, identity.DefaultWeights(), time.Now),
 		onNewDevice: onNew,
 	}
 }
@@ -64,16 +67,28 @@ func (s *Service) Run(ctx context.Context) ([]model.Device, error) {
 	}
 
 	var newDevicesCount int
-	observedIPs := make([]string, 0, len(devices))
+	observedIDs := make([]int64, 0, len(devices))
 
 	for i := range devices {
-		savedDev, isNew, err := s.storage.UpsertDevice(ctx, &devices[i])
+		obs := identity.Observation{
+			IP:         devices[i].IP,
+			MAC:        devices[i].MAC,
+			Hostname:   devices[i].Hostname,
+			ObservedAt: start,
+		}
+		dec, err := s.matcher.Resolve(ctx, obs)
 		if err != nil {
-			log.Printf("[Discovery] Error upserting device %s: %v", devices[i].IP, err)
+			log.Printf("[Discovery] Error resolving identity for %s: %v", devices[i].IP, err)
 			continue
 		}
 
-		observedIPs = append(observedIPs, savedDev.IP)
+		savedDev, err := s.storage.ApplyDecision(ctx, dec, obs)
+		if err != nil {
+			log.Printf("[Discovery] Error applying decision for %s: %v", devices[i].IP, err)
+			continue
+		}
+
+		observedIDs = append(observedIDs, savedDev.ID)
 
 		// Record point-in-time observation for live device
 		if scanLog != nil {
@@ -89,21 +104,21 @@ func (s *Service) Run(ctx context.Context) ([]model.Device, error) {
 			})
 		}
 
-		if isNew {
+		if dec.Action == identity.ActionCreateNew {
 			newDevicesCount++
 			log.Printf("[Discovery] ⚡ NEW DEVICE DETECTED: %s (%s, %s). Triggering immediate vulnerability scan!",
-				savedDev.IP, savedDev.Hostname, savedDev.Vendor)
+				savedDev.CurrentIP, savedDev.Hostname, savedDev.Vendor)
 
 			if s.onNewDevice != nil {
 				// Immediate reactive trigger!
-				s.onNewDevice(savedDev.IP)
+				s.onNewDevice(savedDev.CurrentIP)
 			}
 		}
 	}
 
 	// Mark missing devices as down and record their down observation
 	if scanLog != nil {
-		if err := s.storage.MarkMissingDevicesDown(ctx, scanLog.ID, observedIPs, start); err != nil {
+		if err := s.storage.MarkMissingDevicesDown(ctx, scanLog.ID, observedIDs, start); err != nil {
 			log.Printf("[Discovery] Error updating missing devices: %v", err)
 		}
 	}

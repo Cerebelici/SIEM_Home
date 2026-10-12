@@ -431,6 +431,182 @@ paths:
             r = requests.get('http://localhost:8080/api/devices/2')
             print(r.json())
 
+    patch:
+      summary: Update editable fields on a device
+      description: Update user-defined metadata including label, criticality rating, and operator notes.
+      tags:
+        - devices
+      operationId: patchDevice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDeviceRequest'
+      responses:
+        '200':
+          description: Updated device entity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Delete device
+      description: Deletes a device and cascades removal of associated records.
+      tags:
+        - devices
+      operationId: deleteDevice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Device deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/devices/{id}/merge:
+    post:
+      summary: Merge another device into target device
+      description: Re-parents all services, vulnerabilities, records, addresses, and agents to the target device and deletes the source.
+      tags:
+        - devices
+      operationId: mergeDevice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MergeDeviceRequest'
+      responses:
+        '200':
+          description: Devices successfully merged.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/devices/{id}/split:
+    post:
+      summary: Split address lease off into new device
+      description: Splits a specific address lease into an independent device entity.
+      tags:
+        - devices
+      operationId: splitDevice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SplitDeviceRequest'
+      responses:
+        '201':
+          description: New device entity created from split lease.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Device'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/devices/{id}/identity:
+    get:
+      summary: Get identity decision audit trail for device
+      description: Returns recent deterministic matching decisions for the device.
+      tags:
+        - devices
+      operationId: getDeviceIdentityDecisions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Identity resolution audit entries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  decisions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/IdentityDecision'
+
+  /api/devices/{id}/addresses:
+    get:
+      summary: Get address lease history for device
+      description: Returns historical IP/MAC network attachments for the device.
+      tags:
+        - devices
+      operationId: getDeviceAddresses
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Address lease history.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  addresses:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeviceAddress'
+
   /api/services:
     get:
       summary: List all active network services
@@ -1160,7 +1336,7 @@ components:
       type: object
       required:
         - id
-        - ip
+        - current_ip
         - status
         - first_seen
         - last_seen
@@ -1170,14 +1346,22 @@ components:
           format: int64
           description: Unique surrogate identifier for the device.
           example: 1
+        current_ip:
+          type: string
+          description: Current IPv4 or IPv6 address.
+          example: 172.28.0.10
         ip:
           type: string
-          description: IPv4 or IPv6 address.
+          description: Backward-compatible alias for current_ip.
           example: 172.28.0.10
         mac:
           type: string
           description: Physical MAC hardware address.
           example: 02:42:AC:1C:00:0A
+        mac_is_random:
+          type: boolean
+          description: True if locally administered bit is set in MAC.
+          example: false
         hostname:
           type: string
           description: Resolved PTR or NetBIOS hostname.
@@ -1191,6 +1375,32 @@ components:
           enum: [up, down]
           description: Operational liveness state.
           example: up
+        asset_uid:
+          type: string
+          format: uuid
+          description: Stable UUID identifying device across IP lease changes.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        managed:
+          type: boolean
+          description: True if device is enrolled with an active Cerberus agent.
+          example: false
+        identity_confidence:
+          type: number
+          format: float
+          description: Match confidence score (0.0 to 1.0).
+          example: 1.0
+        label:
+          type: string
+          description: User-assigned label.
+          example: core-router
+        criticality:
+          type: string
+          enum: [low, normal, high, critical]
+          description: Asset criticality tier.
+          example: normal
+        notes:
+          type: string
+          description: Free-form operator notes.
         first_seen:
           type: string
           format: date-time
@@ -1217,6 +1427,87 @@ components:
           description: Detailed list of correlated vulnerabilities (included on detail queries).
           items:
             $ref: '#/components/schemas/Vulnerability'
+
+    DeviceAddress:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        device_id:
+          type: integer
+          format: int64
+        ip:
+          type: string
+        mac:
+          type: string
+        first_seen:
+          type: string
+          format: date-time
+        last_seen:
+          type: string
+          format: date-time
+        closed:
+          type: boolean
+
+    IdentityDecision:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        observed_at:
+          type: string
+          format: date-time
+        ip:
+          type: string
+        mac:
+          type: string
+        hostname:
+          type: string
+        chosen_device_id:
+          type: integer
+          format: int64
+          nullable: true
+        score:
+          type: number
+        runner_up_device_id:
+          type: integer
+          format: int64
+          nullable: true
+        runner_up_score:
+          type: number
+        reason:
+          type: string
+
+    UpdateDeviceRequest:
+      type: object
+      properties:
+        label:
+          type: string
+        criticality:
+          type: string
+          enum: [low, normal, high, critical]
+        notes:
+          type: string
+
+    MergeDeviceRequest:
+      type: object
+      required:
+        - source_id
+      properties:
+        source_id:
+          type: integer
+          format: int64
+
+    SplitDeviceRequest:
+      type: object
+      required:
+        - address_id
+      properties:
+        address_id:
+          type: integer
+          format: int64
 
     DeviceListResponse:
       type: object

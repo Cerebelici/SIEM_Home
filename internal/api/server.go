@@ -2,10 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -61,6 +64,12 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 	// REST API routes using Go 1.22+ method-matching patterns
 	mux.HandleFunc("GET /api/devices", s.handleGetDevices)
 	mux.HandleFunc("GET /api/devices/{id}", s.handleGetDeviceByID)
+	mux.HandleFunc("PATCH /api/devices/{id}", s.handlePatchDevice)
+	mux.HandleFunc("POST /api/devices/{id}/merge", s.handleMergeDevice)
+	mux.HandleFunc("POST /api/devices/{id}/split", s.handleSplitDevice)
+	mux.HandleFunc("DELETE /api/devices/{id}", s.handleDeleteDevice)
+	mux.HandleFunc("GET /api/devices/{id}/identity", s.handleGetDeviceIdentity)
+	mux.HandleFunc("GET /api/devices/{id}/addresses", s.handleGetDeviceAddresses)
 	mux.HandleFunc("GET /api/services", s.handleGetServices)
 	mux.HandleFunc("GET /api/vulnerabilities", s.handleGetVulnerabilities)
 	mux.HandleFunc("GET /api/scans", s.handleGetScans)
@@ -201,4 +210,28 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		log.Printf("[API] Failed to encode JSON response: %v", err)
 	}
+}
+
+func (s *Server) isAuthorizedForMutation(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		ip, err := netip.ParseAddr(host)
+		if err == nil && ip.IsLoopback() {
+			return true
+		}
+	} else {
+		ip, err := netip.ParseAddr(r.RemoteAddr)
+		if err == nil && ip.IsLoopback() {
+			return true
+		}
+	}
+
+	if s.cfg.APIKey != "" {
+		key := r.Header.Get("X-API-Key")
+		if subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.APIKey)) == 1 {
+			return true
+		}
+	}
+
+	return false
 }

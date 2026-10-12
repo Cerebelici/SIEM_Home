@@ -3,6 +3,10 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gr0gu/cerberus/internal/identity"
 )
 
 type migration struct {
@@ -221,6 +225,149 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 5,
+			up: func(tx *sql.Tx) error {
+				// 1. Create devices_new
+				createDevicesNew := `CREATE TABLE devices_new (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					current_ip TEXT NOT NULL,
+					mac TEXT,
+					hostname TEXT,
+					vendor TEXT,
+					status TEXT NOT NULL DEFAULT 'up',
+					first_seen DATETIME NOT NULL,
+					last_seen DATETIME NOT NULL,
+					asset_uid TEXT NOT NULL UNIQUE,
+					mac_is_random INTEGER NOT NULL DEFAULT 0,
+					port_profile_hash TEXT,
+					managed INTEGER NOT NULL DEFAULT 0,
+					identity_confidence REAL NOT NULL DEFAULT 1.0,
+					label TEXT,
+					criticality TEXT NOT NULL DEFAULT 'normal',
+					notes TEXT
+				);`
+				if _, err := tx.Exec(createDevicesNew); err != nil {
+					return fmt.Errorf("creating devices_new: %w", err)
+				}
+
+				// 2. Read existing rows from devices
+				rows, err := tx.Query(`SELECT id, ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''), status, first_seen, last_seen FROM devices;`)
+				if err != nil {
+					return fmt.Errorf("querying devices for migration 5: %w", err)
+				}
+				defer rows.Close()
+
+				type oldDevice struct {
+					id        int64
+					ip        string
+					mac       string
+					hostname  string
+					vendor    string
+					status    string
+					firstSeen time.Time
+					lastSeen  time.Time
+				}
+				var oldDevices []oldDevice
+				for rows.Next() {
+					var d oldDevice
+					if err := rows.Scan(&d.id, &d.ip, &d.mac, &d.hostname, &d.vendor, &d.status, &d.firstSeen, &d.lastSeen); err != nil {
+						return fmt.Errorf("scanning old device: %w", err)
+					}
+					oldDevices = append(oldDevices, d)
+				}
+				rows.Close()
+
+				// 3. Insert into devices_new
+				insertStmt, err := tx.Prepare(`INSERT INTO devices_new (
+					id, current_ip, mac, hostname, vendor, status, first_seen, last_seen,
+					asset_uid, mac_is_random, port_profile_hash, managed, identity_confidence,
+					label, criticality, notes
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 1.0, '', 'normal', '');`)
+				if err != nil {
+					return fmt.Errorf("preparing insert devices_new: %w", err)
+				}
+				defer insertStmt.Close()
+
+				for _, d := range oldDevices {
+					assetUID := uuid.NewString()
+					macIsRandom := 0
+					if d.mac != "" && identity.IsLocallyAdministered(d.mac) {
+						macIsRandom = 1
+					}
+					if _, err := insertStmt.Exec(
+						d.id, d.ip, d.mac, d.hostname, d.vendor, d.status, d.firstSeen, d.lastSeen,
+						assetUID, macIsRandom,
+					); err != nil {
+						return fmt.Errorf("inserting device into devices_new: %w", err)
+					}
+				}
+
+				// 4. Drop devices and rename devices_new to devices
+				if _, err := tx.Exec(`DROP TABLE devices;`); err != nil {
+					return fmt.Errorf("dropping old devices table: %w", err)
+				}
+				if _, err := tx.Exec(`ALTER TABLE devices_new RENAME TO devices;`); err != nil {
+					return fmt.Errorf("renaming devices_new: %w", err)
+				}
+
+				// 5. Recreate indexes and create device_addresses & identity_decisions
+				queries := []string{
+					`CREATE INDEX IF NOT EXISTS idx_devices_current_ip ON devices(current_ip);`,
+					`CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen DESC);`,
+					`CREATE INDEX IF NOT EXISTS idx_devices_mac ON devices(mac);`,
+					`CREATE INDEX IF NOT EXISTS idx_devices_asset_uid ON devices(asset_uid);`,
+					`CREATE INDEX IF NOT EXISTS idx_services_dev_state ON services(device_id, state);`,
+					`CREATE TABLE IF NOT EXISTS device_addresses (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+						ip TEXT NOT NULL,
+						mac TEXT,
+						first_seen DATETIME NOT NULL,
+						last_seen DATETIME NOT NULL,
+						closed INTEGER NOT NULL DEFAULT 0
+					);`,
+					`CREATE INDEX IF NOT EXISTS idx_device_addresses_dev ON device_addresses(device_id);`,
+					`CREATE INDEX IF NOT EXISTS idx_device_addresses_ip ON device_addresses(ip);`,
+					`INSERT INTO device_addresses (device_id, ip, mac, first_seen, last_seen, closed)
+					 SELECT id, current_ip, mac, first_seen, last_seen, 0 FROM devices;`,
+					`CREATE TABLE IF NOT EXISTS identity_decisions (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						observed_at DATETIME NOT NULL,
+						ip TEXT NOT NULL,
+						mac TEXT,
+						hostname TEXT,
+						chosen_device_id INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+						score REAL NOT NULL,
+						runner_up_device_id INTEGER REFERENCES devices(id) ON DELETE SET NULL,
+						runner_up_score REAL NOT NULL DEFAULT 0,
+						reason TEXT NOT NULL
+					);`,
+					`CREATE INDEX IF NOT EXISTS idx_identity_decisions_device ON identity_decisions(chosen_device_id);`,
+					`CREATE INDEX IF NOT EXISTS idx_identity_decisions_observed ON identity_decisions(observed_at DESC);`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 5 post-rebuild query (%s): %w", q, err)
+					}
+				}
+
+				// 6. Verify foreign keys
+				fkRows, err := tx.Query(`PRAGMA foreign_key_check;`)
+				if err != nil {
+					return fmt.Errorf("running foreign_key_check: %w", err)
+				}
+				defer fkRows.Close()
+				if fkRows.Next() {
+					var table, parent, fkid string
+					var rowid int64
+					_ = fkRows.Scan(&table, &rowid, &parent, &fkid)
+					return fmt.Errorf("foreign_key_check violation in table %s, rowid %d, parent %s", table, rowid, parent)
+				}
+
+				return nil
+			},
+		},
 	}
 }
 
@@ -233,20 +380,44 @@ func (s *Storage) runMigrations() error {
 
 	for _, m := range s.getMigrations() {
 		if m.version > currentVersion {
+			if m.version == 5 {
+				if _, err := s.w.Exec("PRAGMA foreign_keys = OFF;"); err != nil {
+					return fmt.Errorf("disabling foreign keys for migration 5: %w", err)
+				}
+			}
+
 			tx, err := s.w.Begin()
 			if err != nil {
+				if m.version == 5 {
+					_, _ = s.w.Exec("PRAGMA foreign_keys = ON;")
+				}
 				return fmt.Errorf("begin migration %d: %w", m.version, err)
 			}
 			if err := m.up(tx); err != nil {
 				_ = tx.Rollback()
+				if m.version == 5 {
+					_, _ = s.w.Exec("PRAGMA foreign_keys = ON;")
+				}
 				return fmt.Errorf("running migration %d: %w", m.version, err)
 			}
 			if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d;", m.version)); err != nil {
 				_ = tx.Rollback()
+				if m.version == 5 {
+					_, _ = s.w.Exec("PRAGMA foreign_keys = ON;")
+				}
 				return fmt.Errorf("setting user_version = %d: %w", m.version, err)
 			}
 			if err := tx.Commit(); err != nil {
+				if m.version == 5 {
+					_, _ = s.w.Exec("PRAGMA foreign_keys = ON;")
+				}
 				return fmt.Errorf("committing migration %d: %w", m.version, err)
+			}
+
+			if m.version == 5 {
+				if _, err := s.w.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+					return fmt.Errorf("re-enabling foreign keys after migration 5: %w", err)
+				}
 			}
 		}
 	}

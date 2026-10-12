@@ -10,6 +10,7 @@ import (
 
 	"github.com/gr0gu/cerberus/internal/config"
 	"github.com/gr0gu/cerberus/internal/discovery"
+	"github.com/gr0gu/cerberus/internal/identity"
 	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/storage"
@@ -21,6 +22,7 @@ type Scheduler struct {
 	storage          *storage.Storage
 	scanner          *scanner.Scanner
 	discoveryService *discovery.Service
+	matcher          *identity.Matcher
 
 	// Concurrency and scheduling
 	wg              sync.WaitGroup
@@ -44,6 +46,7 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 		cfg:               cfg,
 		storage:           store,
 		scanner:           scn,
+		matcher:           identity.NewMatcher(store, identity.DefaultWeights(), time.Now),
 		immediateVulnCh:   make(chan string, 100),
 		manualDiscoveryCh: make(chan chan error, 5),
 		manualVulnCh:      make(chan chan error, 5),
@@ -250,22 +253,25 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 
 	totalVulnsFound := 0
 	for _, res := range results {
-		err := s.storage.WithTx(ctx, func(tx *storage.Tx) error {
-			dev, err := tx.GetDeviceByIP(ctx, res.IP)
-			if err != nil || dev == nil {
-				// If device wasn't in DB yet, upsert basic info
-				dev, _, err = tx.UpsertDevice(ctx, &model.Device{
-					IP:       res.IP,
-					MAC:      res.MAC,
-					Hostname: res.Hostname,
-					Vendor:   res.Vendor,
-					Status:   res.Status,
-				})
-				if err != nil {
-					return fmt.Errorf("upserting device %s: %w", res.IP, err)
-				}
-			}
+		portProfile, _ := identity.PortProfile(res.Services)
+		obs := identity.Observation{
+			IP:         res.IP,
+			MAC:        res.MAC,
+			Hostname:   res.Hostname,
+			Ports:      portProfile,
+			ObservedAt: start,
+		}
+		dec, err := s.matcher.Resolve(ctx, obs)
+		if err != nil {
+			log.Printf("[%s Scan] Error resolving identity for %s: %v", scanType, res.IP, err)
+			continue
+		}
 
+		err = s.storage.WithTx(ctx, func(tx *storage.Tx) error {
+			dev, err := tx.ApplyDecision(ctx, dec, obs)
+			if err != nil {
+				return fmt.Errorf("applying decision for %s: %w", res.IP, err)
+			}
 			if dev == nil {
 				return nil
 			}

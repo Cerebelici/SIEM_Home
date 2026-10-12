@@ -147,182 +147,6 @@ func (s *Storage) RawWriter() *sql.DB {
 	return s.w
 }
 
-// UpsertDevice inserts a new device or updates last_seen/metadata of an existing one.
-func (s *Storage) UpsertDevice(ctx context.Context, dev *model.Device) (*model.Device, bool, error) {
-	return upsertDeviceInternal(ctx, s.w, dev)
-}
-
-func (t *Tx) UpsertDevice(ctx context.Context, dev *model.Device) (*model.Device, bool, error) {
-	return upsertDeviceInternal(ctx, t.tx, dev)
-}
-
-func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device) (*model.Device, bool, error) {
-	now := time.Now().UTC()
-
-	var existingID int64
-	var firstSeen time.Time
-
-	querySelect := `SELECT id, first_seen FROM devices WHERE ip = ?;`
-	err := eq.QueryRowContext(ctx, querySelect, dev.IP).Scan(&existingID, &firstSeen)
-
-	if err == sql.ErrNoRows {
-		insertQuery := `INSERT INTO devices (ip, mac, hostname, vendor, status, first_seen, last_seen)
-			VALUES (?, ?, ?, ?, ?, ?, ?);`
-		status := dev.Status
-		if status == "" {
-			status = "up"
-		}
-		res, err := eq.ExecContext(ctx, insertQuery, dev.IP, dev.MAC, dev.Hostname, dev.Vendor, status, now, now)
-		if err != nil {
-			return nil, false, fmt.Errorf("inserting device: %w", err)
-		}
-
-		id, _ := res.LastInsertId()
-		dev.ID = id
-		dev.FirstSeen = now
-		dev.LastSeen = now
-		dev.Status = status
-		return dev, true, nil
-	} else if err != nil {
-		return nil, false, fmt.Errorf("querying device: %w", err)
-	}
-
-	updateQuery := `UPDATE devices SET
-		last_seen = ?,
-		status = ?,
-		mac = CASE WHEN ? != '' THEN ? ELSE mac END,
-		hostname = CASE WHEN ? != '' THEN ? ELSE hostname END,
-		vendor = CASE WHEN ? != '' THEN ? ELSE vendor END
-		WHERE id = ?;`
-
-	status := dev.Status
-	if status == "" {
-		status = "up"
-	}
-
-	_, err = eq.ExecContext(ctx, updateQuery, now, status, dev.MAC, dev.MAC, dev.Hostname, dev.Hostname, dev.Vendor, dev.Vendor, existingID)
-	if err != nil {
-		return nil, false, fmt.Errorf("updating device: %w", err)
-	}
-
-	dev.ID = existingID
-	dev.FirstSeen = firstSeen
-	dev.LastSeen = now
-	dev.Status = status
-	return dev, false, nil
-}
-
-// GetDevices returns all devices, optionally filtered by status ("up" or "down").
-func (s *Storage) GetDevices(ctx context.Context, statusFilter string) ([]model.Device, error) {
-	query := `SELECT d.id, d.ip, COALESCE(d.mac, ''), COALESCE(d.hostname, ''), COALESCE(d.vendor, ''),
-		d.status, d.first_seen, d.last_seen,
-		(SELECT COUNT(*) FROM services s WHERE s.device_id = d.id AND s.state = 'open') as services_count,
-		(SELECT COUNT(*) FROM vulnerabilities v WHERE v.device_id = d.id AND v.status = 'open') as vulns_count
-		FROM devices d`
-
-	var rows *sql.Rows
-	var err error
-
-	if statusFilter != "" {
-		query += ` WHERE d.status = ? ORDER BY d.last_seen DESC;`
-		rows, err = s.r.QueryContext(ctx, query, statusFilter)
-	} else {
-		query += ` ORDER BY d.last_seen DESC;`
-		rows, err = s.r.QueryContext(ctx, query)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("querying devices: %w", err)
-	}
-	defer rows.Close()
-
-	var devices []model.Device
-	for rows.Next() {
-		var d model.Device
-		if err := rows.Scan(&d.ID, &d.IP, &d.MAC, &d.Hostname, &d.Vendor, &d.Status, &d.FirstSeen, &d.LastSeen, &d.ServicesCount, &d.VulnerabilitiesCount); err != nil {
-			return nil, fmt.Errorf("scanning device row: %w", err)
-		}
-		devices = append(devices, d)
-	}
-
-	return devices, nil
-}
-
-// GetDeviceByID returns a single device with all associated services and vulnerabilities.
-func (s *Storage) GetDeviceByID(ctx context.Context, id int64) (*model.Device, error) {
-	query := `SELECT id, ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''),
-		status, first_seen, last_seen
-		FROM devices WHERE id = ?;`
-
-	var d model.Device
-	err := s.r.QueryRowContext(ctx, query, id).Scan(&d.ID, &d.IP, &d.MAC, &d.Hostname, &d.Vendor, &d.Status, &d.FirstSeen, &d.LastSeen)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("querying device by id: %w", err)
-	}
-
-	services, err := s.getServicesForDevice(ctx, d.ID, d.IP)
-	if err != nil {
-		return nil, err
-	}
-	d.Services = services
-	d.ServicesCount = len(services)
-
-	vulns, err := s.getVulnerabilitiesForDevice(ctx, d.ID, d.IP)
-	if err != nil {
-		return nil, err
-	}
-	d.Vulnerabilities = vulns
-	d.VulnerabilitiesCount = len(vulns)
-
-	return &d, nil
-}
-
-// GetDeviceByIP retrieves a device record by its IP.
-func (s *Storage) GetDeviceByIP(ctx context.Context, ip string) (*model.Device, error) {
-	return getDeviceByIPQuery(ctx, s.r, ip)
-}
-
-func (t *Tx) GetDeviceByIP(ctx context.Context, ip string) (*model.Device, error) {
-	return getDeviceByIPQuery(ctx, t.tx, ip)
-}
-
-func getDeviceByIPQuery(ctx context.Context, eq execQuerier, ip string) (*model.Device, error) {
-	query := `SELECT id, ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''),
-		status, first_seen, last_seen
-		FROM devices WHERE ip = ?;`
-
-	var d model.Device
-	err := eq.QueryRowContext(ctx, query, ip).Scan(&d.ID, &d.IP, &d.MAC, &d.Hostname, &d.Vendor, &d.Status, &d.FirstSeen, &d.LastSeen)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("querying device by ip: %w", err)
-	}
-
-	return &d, nil
-}
-
-// GetActiveDeviceIPs returns IPs of devices marked as 'up'.
-func (s *Storage) GetActiveDeviceIPs(ctx context.Context) ([]string, error) {
-	rows, err := s.r.QueryContext(ctx, `SELECT ip FROM devices WHERE status = 'up' ORDER BY last_seen DESC;`)
-	if err != nil {
-		return nil, fmt.Errorf("querying active device IPs: %w", err)
-	}
-	defer rows.Close()
-
-	var ips []string
-	for rows.Next() {
-		var ip string
-		if err := rows.Scan(&ip); err != nil {
-			return nil, err
-		}
-		ips = append(ips, ip)
-	}
-	return ips, nil
-}
-
 // UpsertService saves or updates a detected service for a device.
 func (s *Storage) UpsertService(ctx context.Context, svc *model.Service) (*model.Service, error) {
 	return upsertServiceInternal(ctx, s.w, svc)
@@ -565,11 +389,11 @@ func (s *Storage) getVulnerabilitiesForDevice(ctx context.Context, deviceID int6
 
 // GetAllServices retrieves all detected services across all devices.
 func (s *Storage) GetAllServices(ctx context.Context) ([]model.Service, error) {
-	query := `SELECT s.id, s.device_id, d.ip, s.port, s.protocol, COALESCE(s.service_name, ''),
+	query := `SELECT s.id, s.device_id, d.current_ip, s.port, s.protocol, COALESCE(s.service_name, ''),
 		COALESCE(s.product, ''), COALESCE(s.version, ''), s.state, s.updated_at
 		FROM services s
 		JOIN devices d ON d.id = s.device_id
-		ORDER BY d.ip ASC, s.port ASC;`
+		ORDER BY d.current_ip ASC, s.port ASC;`
 
 	rows, err := s.r.QueryContext(ctx, query)
 	if err != nil {
@@ -590,7 +414,7 @@ func (s *Storage) GetAllServices(ctx context.Context) ([]model.Service, error) {
 
 // GetAllVulnerabilities retrieves all detected CVEs, optionally filtered by severity.
 func (s *Storage) GetAllVulnerabilities(ctx context.Context, severity string) ([]model.Vulnerability, error) {
-	query := `SELECT v.id, v.device_id, d.ip, v.service_port, v.cve_id, COALESCE(v.title, ''),
+	query := `SELECT v.id, v.device_id, d.current_ip, v.service_port, v.cve_id, COALESCE(v.title, ''),
 		v.severity, v.cvss_score, COALESCE(v.description, ''), COALESCE(v.reference_url, ''), v.detected_at,
 		v.is_exploit, COALESCE(v.exploit_refs, '[]'), v.status, v.first_detected_at, v.last_seen_at, v.resolved_at
 		FROM vulnerabilities v
@@ -857,61 +681,6 @@ func severityRank(sev string) int {
 	}
 }
 
-// MarkMissingDevicesDown marks devices absent from a discovery sweep as 'down' and writes 'down' scan records.
-func (s *Storage) MarkMissingDevicesDown(ctx context.Context, scanID int64, observedIPs []string, scanTime time.Time) error {
-	if scanTime.IsZero() {
-		scanTime = time.Now().UTC()
-	} else {
-		scanTime = scanTime.UTC()
-	}
-
-	observedMap := make(map[string]struct{}, len(observedIPs))
-	for _, ip := range observedIPs {
-		observedMap[ip] = struct{}{}
-	}
-
-	return s.WithTx(ctx, func(tx *Tx) error {
-		rows, err := tx.tx.QueryContext(ctx, `SELECT id, ip, status FROM devices;`)
-		if err != nil {
-			return fmt.Errorf("querying devices for missing check: %w", err)
-		}
-		defer rows.Close()
-
-		type missingDev struct {
-			id    int64
-			wasUp bool
-		}
-		var missing []missingDev
-
-		for rows.Next() {
-			var id int64
-			var ip, status string
-			if err := rows.Scan(&id, &ip, &status); err != nil {
-				return fmt.Errorf("scanning device: %w", err)
-			}
-			if _, observed := observedMap[ip]; !observed {
-				missing = append(missing, missingDev{id: id, wasUp: status == "up"})
-			}
-		}
-		rows.Close()
-
-		for _, dev := range missing {
-			if dev.wasUp {
-				if _, err := tx.tx.ExecContext(ctx, `UPDATE devices SET status = 'down' WHERE id = ?;`, dev.id); err != nil {
-					return fmt.Errorf("updating device %d to down: %w", dev.id, err)
-				}
-			}
-
-			insertRecord := `INSERT INTO device_scan_records (device_id, scan_id, status, is_vulnerable, vulns_count, max_severity, recorded_at)
-				VALUES (?, ?, 'down', 0, 0, 'NONE', ?);`
-			if _, err := tx.tx.ExecContext(ctx, insertRecord, dev.id, scanID, scanTime); err != nil {
-				return fmt.Errorf("inserting down record for device %d: %w", dev.id, err)
-			}
-		}
-		return nil
-	})
-}
-
 // PurgeOlderThan purges scan records and scans older than the specified retention age.
 func (s *Storage) PurgeOlderThan(ctx context.Context, recordsAge, scansAge time.Duration) (int64, int64, error) {
 	recordsCutoff := time.Now().UTC().Add(-recordsAge)
@@ -975,13 +744,13 @@ func (s *Storage) GetTimeline(ctx context.Context, from, to time.Time, statusFil
 	}
 
 	// 2. Fetch devices (with optional status filter)
-	devQuery := `SELECT id, ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''), status, first_seen, last_seen FROM devices`
+	devQuery := `SELECT id, current_ip AS ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''), status, first_seen, last_seen FROM devices`
 	var devRows *sql.Rows
 	if statusFilter != "" {
-		devQuery += ` WHERE status = ? ORDER BY ip ASC;`
+		devQuery += ` WHERE status = ? ORDER BY current_ip ASC;`
 		devRows, err = s.r.QueryContext(ctx, devQuery, statusFilter)
 	} else {
-		devQuery += ` ORDER BY ip ASC;`
+		devQuery += ` ORDER BY current_ip ASC;`
 		devRows, err = s.r.QueryContext(ctx, devQuery)
 	}
 	if err != nil {

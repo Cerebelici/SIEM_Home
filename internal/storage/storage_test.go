@@ -327,7 +327,7 @@ func TestTimelineStorage(t *testing.T) {
 	}
 
 	// dev1 is missing
-	err = s.MarkMissingDevicesDown(ctx, scan3.ID, []string{}, t3)
+	err = s.MarkMissingDevicesDown(ctx, scan3.ID, []int64{}, t3)
 	if err != nil {
 		t.Fatalf("mark missing down error: %v", err)
 	}

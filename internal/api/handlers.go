@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -54,6 +55,183 @@ func (s *Server) handleGetDeviceByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, device)
+}
+
+// handlePatchDevice updates editable fields (label, criticality, notes) on a device.
+func (s *Server) handlePatchDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+
+	var req model.UpdateDeviceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+
+	dev, err := s.storage.UpdateDeviceFields(r.Context(), id, req.Label, req.Criticality, req.Notes)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("device %d not found", id)})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, dev)
+}
+
+// handleMergeDevice merges a source device into the target device.
+func (s *Server) handleMergeDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	idStr := r.PathValue("id")
+	targetID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+
+	var req model.MergeDeviceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if req.SourceID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source_id is required"})
+		return
+	}
+
+	if err := s.storage.MergeDevices(r.Context(), targetID, req.SourceID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	dev, _ := s.storage.GetDeviceByID(r.Context(), targetID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "merged",
+		"target": dev,
+	})
+}
+
+// handleSplitDevice splits an address lease off to create a new device entity.
+func (s *Server) handleSplitDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	idStr := r.PathValue("id")
+	deviceID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+
+	var req model.SplitDeviceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	if req.AddressID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "address_id is required"})
+		return
+	}
+
+	newDev, err := s.storage.SplitDevice(r.Context(), deviceID, req.AddressID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, newDev)
+}
+
+// handleDeleteDevice deletes a device entity.
+func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	idStr := r.PathValue("id")
+	deviceID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+
+	if err := s.storage.DeleteDevice(r.Context(), deviceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("device %d not found", deviceID)})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleGetDeviceIdentity returns identity resolution decision logs for a device.
+func (s *Server) handleGetDeviceIdentity(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	deviceID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+
+	limit := 50
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	decisions, err := s.storage.GetDeviceIdentityDecisions(r.Context(), deviceID, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":     len(decisions),
+		"decisions": decisions,
+	})
+}
+
+// handleGetDeviceAddresses returns address lease history for a device.
+func (s *Server) handleGetDeviceAddresses(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	deviceID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device id"})
+		return
+	}
+
+	addresses, err := s.storage.GetDeviceAddresses(r.Context(), deviceID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":     len(addresses),
+		"addresses": addresses,
+	})
 }
 
 // handleGetServices returns all services detected across the entire network.

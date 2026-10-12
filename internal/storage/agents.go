@@ -3,12 +3,16 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/model"
 )
+
+// ErrAgentConflict indicates an agent clone was detected with a conflicting boot ID.
+var ErrAgentConflict = errors.New("agent identity conflict: clone detected")
 
 // EnrollAgent registers an agent or updates its token upon re-enrollment.
 func (s *Storage) EnrollAgent(ctx context.Context, agentID, hostname string, tokenSHA256 []byte) error {
@@ -191,6 +195,26 @@ func (s *Storage) IngestBatch(ctx context.Context, batch *model.TelemetryBatch, 
 	var batchID int64
 	var isDuplicate bool
 
+	// Clone detection: same agent_id, different boot_id, last heartbeat < 3x HB (90s)
+	var storedBootID sql.NullString
+	var storedLastHB sql.NullTime
+	var storedStatus string
+	checkErr := s.r.QueryRowContext(ctx,
+		`SELECT COALESCE(boot_id, ''), last_heartbeat, status FROM agents WHERE agent_id = ?;`,
+		batch.Agent.AgentID,
+	).Scan(&storedBootID, &storedLastHB, &storedStatus)
+	if checkErr == nil {
+		if storedStatus == "conflict" {
+			return 0, false, ErrAgentConflict
+		}
+		if storedBootID.Valid && storedBootID.String != "" && storedBootID.String != batch.Agent.BootID {
+			if storedLastHB.Valid && now.Sub(storedLastHB.Time) < 90*time.Second {
+				_, _ = s.w.ExecContext(ctx, `UPDATE agents SET status = 'conflict' WHERE agent_id = ?;`, batch.Agent.AgentID)
+				return 0, false, ErrAgentConflict
+			}
+		}
+	}
+
 	err := s.WithTx(ctx, func(tx *Tx) error {
 		// 1. Insert into agent_batches
 		batchQuery := `INSERT INTO agent_batches (
@@ -311,6 +335,9 @@ func (s *Storage) IngestBatch(ctx context.Context, batch *model.TelemetryBatch, 
 				}
 			}
 		}
+
+		// 5. Bind agent to device
+		_ = bindAgentInternal(ctx, tx.tx, batch.Agent.AgentID, batch.Agent.Interfaces)
 
 		return nil
 	})

@@ -155,6 +155,10 @@ func (h *Handler) HandleTelemetry(w http.ResponseWriter, r *http.Request) {
 
 	batchID, isDuplicate, err := h.store.IngestBatch(r.Context(), &batch, validEvents, rejectedCount)
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -24,6 +24,7 @@ type Config struct {
 	IngestMaxBody         int64
 	IngestShards          int
 	EventRetention        time.Duration
+	APIKey                string
 }
 
 // Load returns configuration populated with defaults and overridden by environment variables.
@@ -44,6 +45,7 @@ func Load() *Config {
 		IngestMaxBody:         getEnvInt64("CERBERUS_INGEST_MAX_BODY", 1048576),
 		IngestShards:          getEnvInt("CERBERUS_INGEST_SHARDS", runtime.GOMAXPROCS(0)),
 		EventRetention:        getEnvDuration("CERBERUS_EVENT_RETENTION", 168*time.Hour),
+		APIKey:                getEnv("CERBERUS_API_KEY", ""),
 	}
 
 	return cfg
