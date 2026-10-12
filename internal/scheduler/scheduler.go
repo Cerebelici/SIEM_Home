@@ -271,10 +271,14 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 			}
 
 			// Save Services
+			var observedPorts []int
 			for _, svc := range res.Services {
 				svc.DeviceID = dev.ID
 				if _, err := tx.UpsertService(ctx, &svc); err != nil {
 					log.Printf("[%s Scan] Error saving service %d for %s: %v", scanType, svc.Port, res.IP, err)
+				}
+				if svc.State == "open" {
+					observedPorts = append(observedPorts, svc.Port)
 				}
 			}
 
@@ -288,27 +292,28 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 				}
 			}
 
+			hostStatus := res.Status
+			if hostStatus == "" {
+				hostStatus = "up"
+			}
+
+			// When unprivileged (-Pn), nmap marks every host up. Record up only if >= 1 port is open; otherwise skip the record.
+			if (s.scanner.Capabilities() != nil && s.scanner.Capabilities().EffectiveMode == "unprivileged") || s.cfg.ForceUnprivileged {
+				hasOpenPort := len(observedPorts) > 0
+				if !hasOpenPort {
+					return nil
+				}
+			}
+
+			// Reconcile host findings if host is up
+			if hostStatus == "up" {
+				if err := tx.ReconcileHostFindings(ctx, dev.ID, start.UTC(), observedPorts); err != nil {
+					log.Printf("[%s Scan] Error reconciling host findings for %s: %v", scanType, res.IP, err)
+				}
+			}
+
 			// Record point-in-time observation with newly evaluated vulnerability posture
 			if scanLog != nil {
-				hostStatus := res.Status
-				if hostStatus == "" {
-					hostStatus = "up"
-				}
-
-				// When unprivileged (-Pn), nmap marks every host up. Record up only if >= 1 port is open; otherwise skip the record.
-				if (s.scanner.Capabilities() != nil && s.scanner.Capabilities().EffectiveMode == "unprivileged") || s.cfg.ForceUnprivileged {
-					hasOpenPort := false
-					for _, svc := range res.Services {
-						if svc.State == "open" {
-							hasOpenPort = true
-							break
-						}
-					}
-					if !hasOpenPort {
-						return nil
-					}
-				}
-
 				isVuln, vulnsCount, maxSev, _ := tx.GetDeviceSecurityPosture(ctx, dev.ID)
 				_ = tx.RecordDeviceScanObservation(ctx, &model.DeviceScanRecord{
 					DeviceID:     dev.ID,

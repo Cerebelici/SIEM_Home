@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -215,8 +216,8 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 func (s *Storage) GetDevices(ctx context.Context, statusFilter string) ([]model.Device, error) {
 	query := `SELECT d.id, d.ip, COALESCE(d.mac, ''), COALESCE(d.hostname, ''), COALESCE(d.vendor, ''),
 		d.status, d.first_seen, d.last_seen,
-		(SELECT COUNT(*) FROM services s WHERE s.device_id = d.id) as services_count,
-		(SELECT COUNT(*) FROM vulnerabilities v WHERE v.device_id = d.id) as vulns_count
+		(SELECT COUNT(*) FROM services s WHERE s.device_id = d.id AND s.state = 'open') as services_count,
+		(SELECT COUNT(*) FROM vulnerabilities v WHERE v.device_id = d.id AND v.status = 'open') as vulns_count
 		FROM devices d`
 
 	var rows *sql.Rows
@@ -333,14 +334,15 @@ func (t *Tx) UpsertService(ctx context.Context, svc *model.Service) (*model.Serv
 
 func upsertServiceInternal(ctx context.Context, eq execQuerier, svc *model.Service) (*model.Service, error) {
 	now := time.Now().UTC()
-	query := `INSERT INTO services (device_id, port, protocol, service_name, product, version, state, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	query := `INSERT INTO services (device_id, port, protocol, service_name, product, version, state, updated_at, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id, port, protocol) DO UPDATE SET
 			service_name = excluded.service_name,
 			product = excluded.product,
 			version = excluded.version,
 			state = excluded.state,
-			updated_at = excluded.updated_at
+			updated_at = excluded.updated_at,
+			last_seen_at = excluded.last_seen_at
 		RETURNING id;`
 
 	state := svc.State
@@ -350,7 +352,7 @@ func upsertServiceInternal(ctx context.Context, eq execQuerier, svc *model.Servi
 
 	var id int64
 	err := eq.QueryRowContext(ctx, query,
-		svc.DeviceID, svc.Port, svc.Protocol, svc.ServiceName, svc.Product, svc.Version, state, now,
+		svc.DeviceID, svc.Port, svc.Protocol, svc.ServiceName, svc.Product, svc.Version, state, now, now,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("upserting service: %w", err)
@@ -372,23 +374,49 @@ func (t *Tx) UpsertVulnerability(ctx context.Context, v *model.Vulnerability) (*
 
 func upsertVulnerabilityInternal(ctx context.Context, eq execQuerier, v *model.Vulnerability) (*model.Vulnerability, bool, error) {
 	now := time.Now().UTC()
+	firstDetected := v.FirstDetectedAt.UTC()
+	if firstDetected.IsZero() {
+		firstDetected = now
+	}
+	v.LastSeenAt = now
+	v.Status = "open"
+	v.ResolvedAt = nil
+	v.DetectedAt = now
+
+	exploitRefsJSON, err := json.Marshal(v.ExploitRefs)
+	if err != nil {
+		exploitRefsJSON = []byte("[]")
+	}
+	isExploitInt := 0
+	if v.IsExploit {
+		isExploitInt = 1
+	}
+	severity := strings.ToUpper(v.Severity)
+	if severity == "" {
+		severity = "UNKNOWN"
+	}
+	v.Severity = severity
 
 	var existingID int64
-	checkQuery := `SELECT id FROM vulnerabilities WHERE device_id = ? AND service_port = ? AND cve_id = ?;`
-	err := eq.QueryRowContext(ctx, checkQuery, v.DeviceID, v.ServicePort, v.CVEID).Scan(&existingID)
+	var existingFirstDetected sql.NullTime
+	checkQuery := `SELECT id, first_detected_at FROM vulnerabilities WHERE device_id = ? AND service_port = ? AND cve_id = ?;`
+	err = eq.QueryRowContext(ctx, checkQuery, v.DeviceID, v.ServicePort, v.CVEID).Scan(&existingID, &existingFirstDetected)
 
 	if err == sql.ErrNoRows {
-		insertQuery := `INSERT INTO vulnerabilities (device_id, service_port, cve_id, title, severity, cvss_score, description, reference_url, detected_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`
+		insertQuery := `INSERT INTO vulnerabilities (
+			device_id, service_port, cve_id, title, severity, cvss_score, description, reference_url,
+			detected_at, is_exploit, exploit_refs, status, first_detected_at, last_seen_at, resolved_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL);`
 		res, err := eq.ExecContext(ctx, insertQuery,
-			v.DeviceID, v.ServicePort, v.CVEID, v.Title, v.Severity, v.CVSSScore, v.Description, v.ReferenceURL, now,
+			v.DeviceID, v.ServicePort, v.CVEID, v.Title, severity, v.CVSSScore, v.Description, v.ReferenceURL,
+			now, isExploitInt, string(exploitRefsJSON), "open", firstDetected, now,
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf("inserting vulnerability: %w", err)
 		}
 		id, _ := res.LastInsertId()
 		v.ID = id
-		v.DetectedAt = now
+		v.FirstDetectedAt = firstDetected
 		return v, true, nil
 	} else if err != nil {
 		return nil, false, fmt.Errorf("checking vulnerability: %w", err)
@@ -400,19 +428,69 @@ func upsertVulnerabilityInternal(ctx context.Context, eq execQuerier, v *model.V
 		cvss_score = CASE WHEN ? > 0 THEN ? ELSE cvss_score END,
 		description = COALESCE(NULLIF(?, ''), description),
 		reference_url = COALESCE(NULLIF(?, ''), reference_url),
-		detected_at = ?
+		detected_at = ?,
+		is_exploit = ?,
+		exploit_refs = ?,
+		status = 'open',
+		last_seen_at = ?,
+		resolved_at = NULL
 		WHERE id = ?;`
 
 	_, err = eq.ExecContext(ctx, updateQuery,
-		v.Title, v.Severity, v.CVSSScore, v.CVSSScore, v.Description, v.ReferenceURL, now, existingID,
+		v.Title, severity, v.CVSSScore, v.CVSSScore, v.Description, v.ReferenceURL,
+		now, isExploitInt, string(exploitRefsJSON), now, existingID,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("updating vulnerability: %w", err)
 	}
 
 	v.ID = existingID
-	v.DetectedAt = now
+	if existingFirstDetected.Valid {
+		v.FirstDetectedAt = existingFirstDetected.Time
+	}
 	return v, false, nil
+}
+
+// ReconcileHostFindings marks unobserved vulnerabilities as resolved and unobserved services as closed for an active host.
+func (s *Storage) ReconcileHostFindings(ctx context.Context, deviceID int64, scanStart time.Time, observedPorts []int) error {
+	return reconcileHostFindingsInternal(ctx, s.w, deviceID, scanStart, observedPorts)
+}
+
+func (t *Tx) ReconcileHostFindings(ctx context.Context, deviceID int64, scanStart time.Time, observedPorts []int) error {
+	return reconcileHostFindingsInternal(ctx, t.tx, deviceID, scanStart, observedPorts)
+}
+
+func reconcileHostFindingsInternal(ctx context.Context, eq execQuerier, deviceID int64, scanStart time.Time, observedPorts []int) error {
+	scanStartUTC := scanStart.UTC()
+
+	// 1. Resolve open vulnerabilities not seen in this scan
+	vulnQuery := `UPDATE vulnerabilities SET status = 'resolved', resolved_at = ?
+		WHERE device_id = ? AND status = 'open' AND (last_seen_at < ? OR last_seen_at IS NULL);`
+	if _, err := eq.ExecContext(ctx, vulnQuery, scanStartUTC, deviceID, scanStartUTC); err != nil {
+		return fmt.Errorf("reconciling vulnerabilities for device %d: %w", deviceID, err)
+	}
+
+	// 2. Mark services not observed in this scan as closed
+	if len(observedPorts) == 0 {
+		svcQuery := `UPDATE services SET state = 'closed', updated_at = ? WHERE device_id = ? AND state != 'closed';`
+		if _, err := eq.ExecContext(ctx, svcQuery, scanStartUTC, deviceID); err != nil {
+			return fmt.Errorf("closing unobserved services for device %d: %w", deviceID, err)
+		}
+	} else {
+		placeholders := make([]string, len(observedPorts))
+		args := make([]any, 0, 2+len(observedPorts))
+		args = append(args, scanStartUTC, deviceID)
+		for i, p := range observedPorts {
+			placeholders[i] = "?"
+			args = append(args, p)
+		}
+		svcQuery := fmt.Sprintf(`UPDATE services SET state = 'closed', updated_at = ? WHERE device_id = ? AND port NOT IN (%s) AND state != 'closed';`, strings.Join(placeholders, ","))
+		if _, err := eq.ExecContext(ctx, svcQuery, args...); err != nil {
+			return fmt.Errorf("closing unobserved services for device %d: %w", deviceID, err)
+		}
+	}
+
+	return nil
 }
 
 func (s *Storage) getServicesForDevice(ctx context.Context, deviceID int64, deviceIP string) ([]model.Service, error) {
@@ -438,8 +516,9 @@ func (s *Storage) getServicesForDevice(ctx context.Context, deviceID int64, devi
 }
 
 func (s *Storage) getVulnerabilitiesForDevice(ctx context.Context, deviceID int64, deviceIP string) ([]model.Vulnerability, error) {
-	query := `SELECT id, device_id, service_port, cve_id, COALESCE(title, ''), severity, cvss_score, COALESCE(description, ''), COALESCE(reference_url, ''), detected_at
-		FROM vulnerabilities WHERE device_id = ? ORDER BY cvss_score DESC;`
+	query := `SELECT id, device_id, service_port, cve_id, COALESCE(title, ''), severity, cvss_score, COALESCE(description, ''), COALESCE(reference_url, ''), detected_at,
+		is_exploit, COALESCE(exploit_refs, '[]'), status, first_detected_at, last_seen_at, resolved_at
+		FROM vulnerabilities WHERE device_id = ? AND status = 'open' ORDER BY cvss_score DESC;`
 
 	rows, err := s.r.QueryContext(ctx, query, deviceID)
 	if err != nil {
@@ -450,10 +529,35 @@ func (s *Storage) getVulnerabilitiesForDevice(ctx context.Context, deviceID int6
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		if err := rows.Scan(&v.ID, &v.DeviceID, &v.ServicePort, &v.CVEID, &v.Title, &v.Severity, &v.CVSSScore, &v.Description, &v.ReferenceURL, &v.DetectedAt); err != nil {
+		var isExploit int
+		var exploitRefsJSON sql.NullString
+		var firstDetectedAt, lastSeenAt, resolvedAt sql.NullTime
+
+		if err := rows.Scan(
+			&v.ID, &v.DeviceID, &v.ServicePort, &v.CVEID, &v.Title,
+			&v.Severity, &v.CVSSScore, &v.Description, &v.ReferenceURL, &v.DetectedAt,
+			&isExploit, &exploitRefsJSON, &v.Status, &firstDetectedAt, &lastSeenAt, &resolvedAt,
+		); err != nil {
 			return nil, err
 		}
 		v.DeviceIP = deviceIP
+		v.IsExploit = isExploit != 0
+		if exploitRefsJSON.Valid && exploitRefsJSON.String != "" {
+			_ = json.Unmarshal([]byte(exploitRefsJSON.String), &v.ExploitRefs)
+		}
+		if firstDetectedAt.Valid {
+			v.FirstDetectedAt = firstDetectedAt.Time
+		} else {
+			v.FirstDetectedAt = v.DetectedAt
+		}
+		if lastSeenAt.Valid {
+			v.LastSeenAt = lastSeenAt.Time
+		} else {
+			v.LastSeenAt = v.DetectedAt
+		}
+		if resolvedAt.Valid {
+			v.ResolvedAt = &resolvedAt.Time
+		}
 		vulns = append(vulns, v)
 	}
 	return vulns, nil
@@ -487,7 +591,8 @@ func (s *Storage) GetAllServices(ctx context.Context) ([]model.Service, error) {
 // GetAllVulnerabilities retrieves all detected CVEs, optionally filtered by severity.
 func (s *Storage) GetAllVulnerabilities(ctx context.Context, severity string) ([]model.Vulnerability, error) {
 	query := `SELECT v.id, v.device_id, d.ip, v.service_port, v.cve_id, COALESCE(v.title, ''),
-		v.severity, v.cvss_score, COALESCE(v.description, ''), COALESCE(v.reference_url, ''), v.detected_at
+		v.severity, v.cvss_score, COALESCE(v.description, ''), COALESCE(v.reference_url, ''), v.detected_at,
+		v.is_exploit, COALESCE(v.exploit_refs, '[]'), v.status, v.first_detected_at, v.last_seen_at, v.resolved_at
 		FROM vulnerabilities v
 		JOIN devices d ON d.id = v.device_id`
 
@@ -495,8 +600,8 @@ func (s *Storage) GetAllVulnerabilities(ctx context.Context, severity string) ([
 	var err error
 
 	if severity != "" {
-		query += ` WHERE UPPER(v.severity) = UPPER(?) ORDER BY v.cvss_score DESC, v.detected_at DESC;`
-		rows, err = s.r.QueryContext(ctx, query, severity)
+		query += ` WHERE v.severity = ? ORDER BY v.cvss_score DESC, v.detected_at DESC;`
+		rows, err = s.r.QueryContext(ctx, query, strings.ToUpper(severity))
 	} else {
 		query += ` ORDER BY v.cvss_score DESC, v.detected_at DESC;`
 		rows, err = s.r.QueryContext(ctx, query)
@@ -510,8 +615,33 @@ func (s *Storage) GetAllVulnerabilities(ctx context.Context, severity string) ([
 	var vulns []model.Vulnerability
 	for rows.Next() {
 		var v model.Vulnerability
-		if err := rows.Scan(&v.ID, &v.DeviceID, &v.DeviceIP, &v.ServicePort, &v.CVEID, &v.Title, &v.Severity, &v.CVSSScore, &v.Description, &v.ReferenceURL, &v.DetectedAt); err != nil {
+		var isExploit int
+		var exploitRefsJSON sql.NullString
+		var firstDetectedAt, lastSeenAt, resolvedAt sql.NullTime
+
+		if err := rows.Scan(
+			&v.ID, &v.DeviceID, &v.DeviceIP, &v.ServicePort, &v.CVEID, &v.Title,
+			&v.Severity, &v.CVSSScore, &v.Description, &v.ReferenceURL, &v.DetectedAt,
+			&isExploit, &exploitRefsJSON, &v.Status, &firstDetectedAt, &lastSeenAt, &resolvedAt,
+		); err != nil {
 			return nil, err
+		}
+		v.IsExploit = isExploit != 0
+		if exploitRefsJSON.Valid && exploitRefsJSON.String != "" {
+			_ = json.Unmarshal([]byte(exploitRefsJSON.String), &v.ExploitRefs)
+		}
+		if firstDetectedAt.Valid {
+			v.FirstDetectedAt = firstDetectedAt.Time
+		} else {
+			v.FirstDetectedAt = v.DetectedAt
+		}
+		if lastSeenAt.Valid {
+			v.LastSeenAt = lastSeenAt.Time
+		} else {
+			v.LastSeenAt = v.DetectedAt
+		}
+		if resolvedAt.Valid {
+			v.ResolvedAt = &resolvedAt.Time
 		}
 		vulns = append(vulns, v)
 	}
@@ -593,8 +723,8 @@ func (s *Storage) GetRecentScans(ctx context.Context, limit int) ([]model.ScanLo
 func (s *Storage) GetCounts(ctx context.Context) (totalDevs, activeDevs, totalSvcs, totalVulns int, err error) {
 	_ = s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices;`).Scan(&totalDevs)
 	_ = s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE status = 'up';`).Scan(&activeDevs)
-	_ = s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM services;`).Scan(&totalSvcs)
-	_ = s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM vulnerabilities;`).Scan(&totalVulns)
+	_ = s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM services WHERE state = 'open';`).Scan(&totalSvcs)
+	_ = s.r.QueryRowContext(ctx, `SELECT COUNT(*) FROM vulnerabilities WHERE status = 'open';`).Scan(&totalVulns)
 
 	return totalDevs, activeDevs, totalSvcs, totalVulns, nil
 }
@@ -683,7 +813,7 @@ func (t *Tx) GetDeviceSecurityPosture(ctx context.Context, deviceID int64) (bool
 }
 
 func getDeviceSecurityPostureInternal(ctx context.Context, eq execQuerier, deviceID int64) (bool, int, string, error) {
-	query := `SELECT COALESCE(severity, 'UNKNOWN') FROM vulnerabilities WHERE device_id = ?;`
+	query := `SELECT COALESCE(severity, 'UNKNOWN') FROM vulnerabilities WHERE device_id = ? AND status = 'open';`
 	rows, err := eq.QueryContext(ctx, query, deviceID)
 	if err != nil {
 		return false, 0, "NONE", fmt.Errorf("querying vulnerabilities for posture: %w", err)
@@ -703,7 +833,7 @@ func getDeviceSecurityPostureInternal(ctx context.Context, eq execQuerier, devic
 		rank := severityRank(sev)
 		if rank > highestRank {
 			highestRank = rank
-			maxSeverity = strings.ToUpper(sev)
+			maxSeverity = sev
 		}
 	}
 
@@ -711,7 +841,7 @@ func getDeviceSecurityPostureInternal(ctx context.Context, eq execQuerier, devic
 }
 
 func severityRank(sev string) int {
-	switch strings.ToUpper(sev) {
+	switch sev {
 	case "CRITICAL":
 		return 5
 	case "HIGH":

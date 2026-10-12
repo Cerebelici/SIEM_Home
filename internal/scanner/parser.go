@@ -6,13 +6,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gr0gu/cerberus/internal/model"
 )
 
 var (
-	cveRegex  = regexp.MustCompile(`\bCVE-\d{4}-\d{4,7}\b`)
-	cvssRegex = regexp.MustCompile(`\b(10(?:\.0)?|[0-9]\.[0-9])\b`)
+	anchoredCVERegex = regexp.MustCompile(`(CVE-\d{4}-\d{4,7})(?:\s+(10(?:\.0)?|\d\.\d)\b)?`)
 )
 
 // ParseNmapXML unmarshals raw XML bytes into NmapRun.
@@ -140,6 +140,7 @@ func ExtractHostResults(run *NmapRun) []model.ScanHostResult {
 func extractVulnerabilitiesFromScripts(ip string, port int, scripts []NmapScript) []model.Vulnerability {
 	var vulns []model.Vulnerability
 	seenCVEs := make(map[string]bool)
+	now := time.Now().UTC()
 
 	for _, script := range scripts {
 		// 1. Structured table parsing (vulners.nse format)
@@ -151,30 +152,36 @@ func extractVulnerabilitiesFromScripts(ip string, port int, scripts []NmapScript
 			}
 		}
 
-		// 2. Fallback text output regex parsing
+		// 2. Fallback text output regex parsing with anchored regex
 		if script.Output != "" {
 			lines := strings.Split(script.Output, "\n")
 			for _, line := range lines {
-				cveMatch := cveRegex.FindString(line)
-				if cveMatch != "" && !seenCVEs[cveMatch] {
-					seenCVEs[cveMatch] = true
+				matches := anchoredCVERegex.FindStringSubmatch(line)
+				if len(matches) > 1 && matches[1] != "" {
+					cveMatch := matches[1]
+					if !seenCVEs[cveMatch] {
+						seenCVEs[cveMatch] = true
 
-					var cvssScore float64
-					cvssMatch := cvssRegex.FindString(line)
-					if cvssMatch != "" {
-						cvssScore, _ = strconv.ParseFloat(cvssMatch, 64)
+						var cvssScore float64
+						if len(matches) > 2 && matches[2] != "" {
+							cvssScore, _ = strconv.ParseFloat(matches[2], 64)
+						}
+
+						vulns = append(vulns, model.Vulnerability{
+							DeviceIP:        ip,
+							ServicePort:     port,
+							CVEID:           cveMatch,
+							Title:           fmt.Sprintf("Vulnerability in port %d (%s)", port, script.ID),
+							Severity:        SeverityFromCVSS(cvssScore),
+							CVSSScore:       cvssScore,
+							Description:     strings.TrimSpace(line),
+							ReferenceURL:    fmt.Sprintf("https://nvd.nist.gov/vuln/detail/%s", cveMatch),
+							Status:          "open",
+							FirstDetectedAt: now,
+							LastSeenAt:      now,
+							DetectedAt:      now,
+						})
 					}
-
-					vulns = append(vulns, model.Vulnerability{
-						DeviceIP:     ip,
-						ServicePort:  port,
-						CVEID:        cveMatch,
-						Title:        fmt.Sprintf("Vulnerability in port %d (%s)", port, script.ID),
-						Severity:     SeverityFromCVSS(cvssScore),
-						CVSSScore:    cvssScore,
-						Description:  strings.TrimSpace(line),
-						ReferenceURL: fmt.Sprintf("https://nvd.nist.gov/vuln/detail/%s", cveMatch),
-					})
 				}
 			}
 		}
@@ -185,51 +192,99 @@ func extractVulnerabilitiesFromScripts(ip string, port int, scripts []NmapScript
 
 func parseStructuredScriptTables(ip string, port int, script NmapScript) []model.Vulnerability {
 	var vulns []model.Vulnerability
+	now := time.Now().UTC()
 
-	// Recursively inspect tables for CVE items
-	var traverseTable func(tbl NmapTable)
-	traverseTable = func(tbl NmapTable) {
-		// Check if this table is a CVE entry
-		isCVE := strings.HasPrefix(strings.ToUpper(tbl.Key), "CVE-")
-		var cveID, elemType string
-		var cvssScore float64
+	var processTable func(tbl NmapTable)
+	processTable = func(tbl NmapTable) {
+		// 1. Gather non-CVE exploit IDs under this table
+		var exploitRefs []string
+		for _, sub := range tbl.Tables {
+			var id, elemType, isExploit string
+			for _, elem := range sub.Elems {
+				switch elem.Key {
+				case "id":
+					id = elem.Value
+				case "type":
+					elemType = elem.Value
+				case "is_exploit":
+					isExploit = elem.Value
+				}
+			}
+			if id == "" {
+				id = sub.Key
+			}
 
-		for _, elem := range tbl.Elems {
-			switch elem.Key {
-			case "id":
-				cveID = elem.Value
-			case "type":
-				elemType = elem.Value
-			case "cvss":
-				cvssScore, _ = strconv.ParseFloat(elem.Value, 64)
+			if !strings.HasPrefix(strings.ToUpper(id), "CVE-") {
+				if isExploit == "true" ||
+					strings.HasPrefix(strings.ToUpper(id), "EDB-ID:") ||
+					strings.HasPrefix(strings.ToUpper(id), "PACKETSTORM:") ||
+					strings.HasPrefix(strings.ToUpper(id), "MSF:") ||
+					elemType == "exploitdb" || elemType == "packetstorm" {
+					exploitRefs = append(exploitRefs, id)
+				}
 			}
 		}
 
-		if isCVE || (cveID != "" && (elemType == "cve" || strings.HasPrefix(strings.ToUpper(cveID), "CVE-"))) {
-			targetCVE := cveID
-			if targetCVE == "" {
-				targetCVE = tbl.Key
+		// 2. Extract CVE entries under this table
+		for _, sub := range tbl.Tables {
+			var id, elemType, isExploit string
+			var cvssScore float64
+			for _, elem := range sub.Elems {
+				switch elem.Key {
+				case "id":
+					id = elem.Value
+				case "type":
+					elemType = elem.Value
+				case "is_exploit":
+					isExploit = elem.Value
+				case "cvss":
+					cvssScore, _ = strconv.ParseFloat(elem.Value, 64)
+				}
+			}
+			if id == "" {
+				id = sub.Key
 			}
 
-			vulns = append(vulns, model.Vulnerability{
-				DeviceIP:     ip,
-				ServicePort:  port,
-				CVEID:        targetCVE,
-				Title:        fmt.Sprintf("Vulnerability %s on port %d", targetCVE, port),
-				Severity:     SeverityFromCVSS(cvssScore),
-				CVSSScore:    cvssScore,
-				Description:  fmt.Sprintf("Identified via %s script", script.ID),
-				ReferenceURL: fmt.Sprintf("https://vulners.com/cve/%s", targetCVE),
-			})
-		}
+			isCVE := strings.HasPrefix(strings.ToUpper(id), "CVE-") ||
+				strings.HasPrefix(strings.ToUpper(sub.Key), "CVE-") ||
+				elemType == "cve"
 
-		for _, subTbl := range tbl.Tables {
-			traverseTable(subTbl)
+			if isCVE {
+				targetCVE := id
+				if targetCVE == "" || !strings.HasPrefix(strings.ToUpper(targetCVE), "CVE-") {
+					targetCVE = sub.Key
+				}
+
+				hasExploit := isExploit == "true" || len(exploitRefs) > 0
+				var currentRefs []string
+				if len(exploitRefs) > 0 {
+					currentRefs = append([]string(nil), exploitRefs...)
+				}
+
+				vulns = append(vulns, model.Vulnerability{
+					DeviceIP:        ip,
+					ServicePort:     port,
+					CVEID:           targetCVE,
+					Title:           fmt.Sprintf("Vulnerability %s on port %d", targetCVE, port),
+					Severity:        SeverityFromCVSS(cvssScore),
+					CVSSScore:       cvssScore,
+					Description:     fmt.Sprintf("Identified via %s script", script.ID),
+					ReferenceURL:    fmt.Sprintf("https://vulners.com/cve/%s", targetCVE),
+					IsExploit:       hasExploit,
+					ExploitRefs:     currentRefs,
+					Status:          "open",
+					FirstDetectedAt: now,
+					LastSeenAt:      now,
+					DetectedAt:      now,
+				})
+			} else if len(sub.Tables) > 0 {
+				processTable(sub)
+			}
 		}
 	}
 
 	for _, tbl := range script.Tables {
-		traverseTable(tbl)
+		processTable(tbl)
 	}
 
 	return vulns

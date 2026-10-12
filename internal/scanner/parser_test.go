@@ -2,9 +2,12 @@ package scanner_test
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/scanner"
 )
 
@@ -161,3 +164,84 @@ func TestScanner_WithMockRunner(t *testing.T) {
 		t.Errorf("expected 2 devices, got %d", len(devices))
 	}
 }
+
+func TestParser_VulnersExploitFixture(t *testing.T) {
+	data, err := os.ReadFile("../../testdata/vulners_exploit.xml")
+	if err != nil {
+		t.Fatalf("reading vulners_exploit.xml fixture: %v", err)
+	}
+
+	run, err := scanner.ParseNmapXML(data)
+	if err != nil {
+		t.Fatalf("parsing XML: %v", err)
+	}
+
+	results := scanner.ExtractHostResults(run)
+	if len(results) == 0 {
+		t.Fatalf("expected host results, got none")
+	}
+
+	var targetVuln *model.Vulnerability
+	for _, v := range results[0].Vulnerabilities {
+		if v.CVEID == "CVE-2021-23017" {
+			targetVuln = &v
+			break
+		}
+	}
+
+	if targetVuln == nil {
+		t.Fatalf("expected CVE-2021-23017 to be parsed")
+	}
+
+	if !targetVuln.IsExploit {
+		t.Errorf("expected IsExploit=true, got false")
+	}
+
+	foundEDB := false
+	for _, ref := range targetVuln.ExploitRefs {
+		if strings.HasPrefix(ref, "EDB-ID:") {
+			foundEDB = true
+			break
+		}
+	}
+	if !foundEDB {
+		t.Errorf("expected ExploitRefs to contain EDB-ID:..., got %v", targetVuln.ExploitRefs)
+	}
+}
+
+func TestRegexFallback_IgnoresVersion(t *testing.T) {
+	xmlContent := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" args="nmap -sV 172.28.0.10" start="1690000000" version="7.94">
+  <host>
+    <status state="up"/>
+    <address addr="172.28.0.10" addrtype="ipv4"/>
+    <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open"/>
+        <service name="ssh"/>
+        <script id="ssh-vuln" output="OpenSSH 7.4 CVE-2018-15473 5.3"/>
+      </port>
+    </ports>
+  </host>
+</nmaprun>`
+
+	run, err := scanner.ParseNmapXML([]byte(xmlContent))
+	if err != nil {
+		t.Fatalf("parsing XML: %v", err)
+	}
+
+	results := scanner.ExtractHostResults(run)
+	if len(results) == 0 || len(results[0].Vulnerabilities) == 0 {
+		t.Fatalf("expected vulnerabilities parsed from script output, got none")
+	}
+
+	vuln := results[0].Vulnerabilities[0]
+	if vuln.CVEID != "CVE-2018-15473" {
+		t.Errorf("expected CVE-2018-15473, got %s", vuln.CVEID)
+	}
+	if vuln.CVSSScore != 5.3 {
+		t.Errorf("expected CVSS score 5.3, got %f", vuln.CVSSScore)
+	}
+}
+

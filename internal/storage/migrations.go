@@ -90,6 +90,29 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 2,
+			up: func(tx *sql.Tx) error {
+				queries := []string{
+					`ALTER TABLE vulnerabilities ADD COLUMN is_exploit INTEGER NOT NULL DEFAULT 0;`,
+					`ALTER TABLE vulnerabilities ADD COLUMN exploit_refs TEXT;`,
+					`ALTER TABLE vulnerabilities ADD COLUMN status TEXT NOT NULL DEFAULT 'open';`,
+					`ALTER TABLE vulnerabilities ADD COLUMN first_detected_at DATETIME;`,
+					`ALTER TABLE vulnerabilities ADD COLUMN last_seen_at DATETIME;`,
+					`ALTER TABLE vulnerabilities ADD COLUMN resolved_at DATETIME;`,
+					`UPDATE vulnerabilities SET first_detected_at = detected_at, last_seen_at = detected_at;`,
+					`ALTER TABLE services ADD COLUMN last_seen_at DATETIME;`,
+					`CREATE INDEX IF NOT EXISTS idx_vuln_device_status ON vulnerabilities(device_id, status);`,
+					`UPDATE vulnerabilities SET severity = UPPER(severity);`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 2 query (%s): %w", q, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 }
 

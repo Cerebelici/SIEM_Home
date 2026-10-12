@@ -35,17 +35,23 @@ type Service struct {
 
 // Vulnerability represents an identified CVE or security weakness.
 type Vulnerability struct {
-	ID           int64     `json:"id"`
-	DeviceID     int64     `json:"device_id"`
-	DeviceIP     string    `json:"device_ip,omitempty"`
-	ServicePort  int       `json:"service_port"`
-	CVEID        string    `json:"cve_id"`
-	Title        string    `json:"title,omitempty"`
-	Severity     string    `json:"severity"` // "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"
-	CVSSScore    float64   `json:"cvss_score"`
-	Description  string    `json:"description,omitempty"`
-	ReferenceURL string    `json:"reference_url,omitempty"`
-	DetectedAt   time.Time `json:"detected_at"`
+	ID              int64      `json:"id"`
+	DeviceID        int64      `json:"device_id"`
+	DeviceIP        string     `json:"device_ip,omitempty"`
+	ServicePort     int        `json:"service_port"`
+	CVEID           string     `json:"cve_id"`
+	Title           string     `json:"title,omitempty"`
+	Severity        string     `json:"severity"` // "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"
+	CVSSScore       float64    `json:"cvss_score"`
+	Description     string     `json:"description,omitempty"`
+	ReferenceURL    string     `json:"reference_url,omitempty"`
+	DetectedAt      time.Time  `json:"detected_at"`
+	IsExploit       bool       `json:"is_exploit"`
+	ExploitRefs     []string   `json:"exploit_refs,omitempty"`
+	Status          string     `json:"status"` // "open" | "resolved"
+	FirstDetectedAt time.Time  `json:"first_detected_at"`
+	LastSeenAt      time.Time  `json:"last_seen_at"`
+	ResolvedAt      *time.Time `json:"resolved_at,omitempty"`
 }
 
 // ScanLog records historical scans executed by Cerberus.
