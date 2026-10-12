@@ -9,26 +9,34 @@ import (
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/scheduler"
 	"github.com/gr0gu/cerberus/internal/storage"
 )
 
 // Server encapsulates the HTTP API and its dependencies.
 type Server struct {
-	cfg       *config.Config
-	storage   *storage.Storage
-	scheduler *scheduler.Scheduler
-	server    *http.Server
-	startTime time.Time
+	cfg          *config.Config
+	storage      *storage.Storage
+	scheduler    *scheduler.Scheduler
+	server       *http.Server
+	startTime    time.Time
+	capabilities *model.Capabilities
 }
 
 // NewServer configures routes, middleware, and returns a new Server instance.
-func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Scheduler) *Server {
+func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Scheduler, caps ...*model.Capabilities) *Server {
+	var c *model.Capabilities
+	if len(caps) > 0 {
+		c = caps[0]
+	}
+
 	s := &Server{
-		cfg:       cfg,
-		storage:   store,
-		scheduler: sched,
-		startTime: time.Now().UTC(),
+		cfg:          cfg,
+		storage:      store,
+		scheduler:    sched,
+		startTime:    time.Now().UTC(),
+		capabilities: c,
 	}
 
 	mux := http.NewServeMux()
@@ -69,6 +77,16 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 // Handler returns the configured http.Handler (useful for unit/integration testing).
 func (s *Server) Handler() http.Handler {
 	return s.server.Handler
+}
+
+// SetCapabilities updates the server's capability profile.
+func (s *Server) SetCapabilities(caps *model.Capabilities) {
+	s.capabilities = caps
+}
+
+// Capabilities returns the server's capability profile.
+func (s *Server) Capabilities() *model.Capabilities {
+	return s.capabilities
 }
 
 // Start runs the HTTP listener (blocking).

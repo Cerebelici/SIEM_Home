@@ -232,6 +232,13 @@ paths:
                 vuln_next_run: '2026-09-25T11:50:00Z'
                 is_discovery_running: false
                 is_vuln_running: false
+                capabilities:
+                  nmap_path: /usr/bin/nmap
+                  nmap_version: "7.94"
+                  vuln_script_ok: true
+                  raw_socket: true
+                  effective_mode: privileged
+                  warnings: []
         '500':
           $ref: '#/components/responses/InternalServerError'
       x-codeSamples:
@@ -1143,6 +1150,7 @@ components:
         - total_vulnerabilities
         - is_discovery_running
         - is_vuln_running
+        - capabilities
       properties:
         uptime:
           type: string
@@ -1185,6 +1193,39 @@ components:
           type: boolean
           description: True if a vulnerability audit sweep is currently executing.
           example: false
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+
+    Capabilities:
+      type: object
+      required:
+        - nmap_path
+        - nmap_version
+        - vuln_script_ok
+        - raw_socket
+        - effective_mode
+      properties:
+        nmap_path:
+          type: string
+          example: /usr/bin/nmap
+        nmap_version:
+          type: string
+          example: "7.94"
+        vuln_script_ok:
+          type: boolean
+          example: true
+        raw_socket:
+          type: boolean
+          example: true
+        effective_mode:
+          type: string
+          enum: [privileged, unprivileged]
+          example: privileged
+        warnings:
+          type: array
+          items:
+            type: string
+          example: []
 
     ScanTriggerResponse:
       type: object

@@ -174,7 +174,11 @@ func (s *Scheduler) executePeriodicVulnScan(ctx context.Context) error {
 
 	log.Printf("[Vuln Worker] Starting periodic vulnerability audit on %d active devices: %v",
 		len(targets), targets)
-	return s.scanTargets(ctx, targets, "vulnerability")
+
+	scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
+	defer cancel()
+
+	return s.scanTargets(scanCtx, targets, "vulnerability")
 }
 
 // -------------------------------------------------------------
@@ -231,7 +235,7 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 	duration := time.Since(start).Milliseconds()
 
 	if scanErr != nil {
-		log.Printf("[%s Scan] Scan error: %v", scanErr, scanErr)
+		log.Printf("[%s Scan] Scan error: %v", scanType, scanErr)
 		if scanLog != nil {
 			scanLog.Status = "failed"
 			scanLog.ErrorMessage = scanErr.Error()

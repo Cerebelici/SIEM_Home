@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -51,14 +52,24 @@ func main() {
 		}
 	}
 
-	// 3. Initialize Scanner Engine
-	scn := scanner.New(cfg)
+	// 3. Preflight & Initialize Scanner Engine
+	caps, err := scanner.Preflight(context.Background(), cfg, &scanner.DefaultCommandRunner{}, exec.LookPath)
+	if err != nil {
+		log.Fatalf("[Main] Preflight check failed: %v", err)
+	}
+	log.Printf("[Main] Capability profile: Nmap %s (%s), VulnScriptOK=%v, RawSocket=%v, Mode=%s",
+		caps.NmapVersion, caps.NmapPath, caps.VulnScriptOK, caps.RawSocket, caps.EffectiveMode)
+	for _, w := range caps.Warnings {
+		log.Printf("[Main] Capability warning: %s", w)
+	}
+
+	scn := scanner.New(cfg, caps)
 
 	// 4. Initialize Scheduler and Goroutine Workers
 	sched := scheduler.New(cfg, store, scn)
 
 	// 5. Initialize Web Server and REST API
-	srv := api.NewServer(cfg, store, sched)
+	srv := api.NewServer(cfg, store, sched, caps)
 
 	// Context for background goroutine lifecycle
 	ctx, cancel := context.WithCancel(context.Background())

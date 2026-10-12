@@ -62,18 +62,29 @@ type ScanLog struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 }
 
+// Capabilities describes the operational abilities and constraints of the scanner environment.
+type Capabilities struct {
+	NmapPath      string   `json:"nmap_path"`
+	NmapVersion   string   `json:"nmap_version"`
+	VulnScriptOK  bool     `json:"vuln_script_ok"`
+	RawSocket     bool     `json:"raw_socket"`
+	EffectiveMode string   `json:"effective_mode"` // "privileged" | "unprivileged"
+	Warnings      []string `json:"warnings,omitempty"`
+}
+
 // SystemStatus provides a live snapshot of the sentinel.
 type SystemStatus struct {
-	Uptime               string     `json:"uptime"`
-	UptimeSeconds        int64      `json:"uptime_seconds"`
-	ActiveDevices        int        `json:"active_devices"`
-	TotalDevices         int        `json:"total_devices"`
-	TotalServices        int        `json:"total_services"`
-	TotalVulnerabilities int        `json:"total_vulnerabilities"`
-	DiscoveryNextRun     *time.Time `json:"discovery_next_run,omitempty"`
-	VulnNextRun          *time.Time `json:"vuln_next_run,omitempty"`
-	IsDiscoveryRunning   bool       `json:"is_discovery_running"`
-	IsVulnRunning        bool       `json:"is_vuln_running"`
+	Uptime               string        `json:"uptime"`
+	UptimeSeconds        int64         `json:"uptime_seconds"`
+	ActiveDevices        int           `json:"active_devices"`
+	TotalDevices         int           `json:"total_devices"`
+	TotalServices        int           `json:"total_services"`
+	TotalVulnerabilities int           `json:"total_vulnerabilities"`
+	DiscoveryNextRun     *time.Time    `json:"discovery_next_run,omitempty"`
+	VulnNextRun          *time.Time    `json:"vuln_next_run,omitempty"`
+	IsDiscoveryRunning   bool          `json:"is_discovery_running"`
+	IsVulnRunning        bool          `json:"is_vuln_running"`
+	Capabilities         *Capabilities `json:"capabilities"`
 }
 
 // ExportData represents the complete network sentinel snapshot for JSON export.

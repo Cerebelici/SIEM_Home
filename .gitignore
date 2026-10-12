@@ -31,6 +31,7 @@ go.work.sum
 # .idea/
 .vscode/
 .agents/
+.temp/
 
 # Local build artifacts and databases
 bin/

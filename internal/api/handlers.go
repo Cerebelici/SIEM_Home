@@ -156,6 +156,14 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	uptimeDuration := time.Since(s.startTime)
 	discNext, vulnNext, discRunning, vulnRunning := s.scheduler.GetNextRuns()
 
+	caps := s.capabilities
+	if caps == nil {
+		caps = &model.Capabilities{
+			NmapPath:      s.cfg.NmapPath,
+			EffectiveMode: "unprivileged",
+		}
+	}
+
 	status := model.SystemStatus{
 		Uptime:               uptimeDuration.Round(time.Second).String(),
 		UptimeSeconds:        int64(uptimeDuration.Seconds()),
@@ -167,6 +175,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		VulnNextRun:          vulnNext,
 		IsDiscoveryRunning:   discRunning,
 		IsVulnRunning:        vulnRunning,
+		Capabilities:         caps,
 	}
 
 	writeJSON(w, http.StatusOK, status)

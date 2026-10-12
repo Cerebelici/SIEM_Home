@@ -80,6 +80,13 @@ func TestAPI_Status(t *testing.T) {
 	if status.TotalDevices != 0 {
 		t.Errorf("expected 0 total devices initially, got %d", status.TotalDevices)
 	}
+
+	if status.Capabilities == nil {
+		t.Fatalf("expected capabilities object in /api/status, got nil")
+	}
+	if status.Capabilities.EffectiveMode == "" {
+		t.Errorf("expected non-empty effective_mode in capabilities")
+	}
 }
 
 func TestAPI_DevicesAndDetails(t *testing.T) {

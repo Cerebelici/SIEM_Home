@@ -16,7 +16,7 @@ type Config struct {
 	VulnerabilityInterval time.Duration
 	NmapPath              string
 	VulnScript            string
-	Unprivileged          bool
+	ForceUnprivileged     bool
 	ScanTimeout           time.Duration
 	SeedMockData          bool
 }
@@ -32,7 +32,7 @@ func Load() *Config {
 		VulnerabilityInterval: getEnvDuration("CERBERUS_VULN_INTERVAL", 5*time.Minute),
 		NmapPath:              getEnv("CERBERUS_NMAP_PATH", "nmap"),
 		VulnScript:            getEnv("CERBERUS_VULN_SCRIPT", "vulners"),
-		Unprivileged:          getEnvBool("CERBERUS_UNPRIVILEGED", true),
+		ForceUnprivileged:     getEnvBool("CERBERUS_UNPRIVILEGED", false),
 		ScanTimeout:           getEnvDuration("CERBERUS_SCAN_TIMEOUT", 15*time.Minute),
 		SeedMockData:          getEnvBool("CERBERUS_MOCK_DATA", false),
 	}
