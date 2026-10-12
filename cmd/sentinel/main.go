@@ -43,9 +43,8 @@ func main() {
 	defer store.Close()
 	log.Printf("[Main] SQLite database connected at %s (WAL mode enabled)", cfg.DBPath)
 
-	// Auto-seed mock data if explicitly requested or if database is empty
-	totalDevs, _, _, _, _ := store.GetCounts(context.Background())
-	if cfg.SeedMockData || totalDevs == 0 {
+	// Auto-seed mock data only if explicitly requested
+	if cfg.SeedMockData {
 		log.Println("[Main] Initializing database with mock timeline data...")
 		if err := store.SeedMockData(context.Background()); err != nil {
 			log.Printf("[Main] Warning: Failed to seed mock data: %v", err)

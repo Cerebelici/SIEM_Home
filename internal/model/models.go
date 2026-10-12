@@ -132,13 +132,14 @@ type ScanTick struct {
 
 // TimelinePeriod represents a continuous activity interval for a device with uniform status and vulnerability metrics.
 type TimelinePeriod struct {
-	StartedAt    time.Time `json:"started_at"`
-	EndedAt      time.Time `json:"ended_at"`
-	Status       string    `json:"status"`
-	IsVulnerable bool      `json:"is_vulnerable"`
-	VulnsCount   int       `json:"vulns_count"`
-	MaxSeverity  string    `json:"max_severity"`
-	IsOngoing    bool      `json:"is_ongoing"`
+	StartedAt              time.Time `json:"started_at"`
+	EndedAt                time.Time `json:"ended_at"`
+	Status                 string    `json:"status"`
+	IsVulnerable           bool      `json:"is_vulnerable"`
+	VulnsCount             int       `json:"vulns_count"`
+	MaxSeverity            string    `json:"max_severity"`
+	IsOngoing              bool      `json:"is_ongoing"`
+	TransitionUncertaintyS int64     `json:"transition_uncertainty_s,omitempty"`
 }
 
 // TimelineDevice represents a device with its segmented activity periods for timeline visualization.

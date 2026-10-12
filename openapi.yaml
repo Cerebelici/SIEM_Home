@@ -1409,6 +1409,11 @@ components:
         is_ongoing:
           type: boolean
           example: true
+        transition_uncertainty_s:
+          type: integer
+          format: int64
+          description: Time gap in seconds between the end of the previous sample and the start of the next sample during state transitions.
+          example: 300
 
     HealthResponse:
       type: object

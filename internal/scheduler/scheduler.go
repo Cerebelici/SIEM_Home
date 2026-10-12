@@ -51,6 +51,7 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 
 	// Wire discovery service to push new devices to immediateVulnCh
 	s.discoveryService = discovery.New(cfg, store, scn, s.EnqueueImmediateScan)
+	s.storage.SetDiscoveryInterval(cfg.DiscoveryInterval)
 
 	return s
 }
@@ -65,18 +66,20 @@ func (s *Scheduler) EnqueueImmediateScan(ip string) {
 	}
 }
 
-// Start boots the three background goroutines:
+// Start boots the background goroutines:
 // 1. Discovery Worker (cron: 30 minutes)
 // 2. Periodic Vulnerability Worker (cron: 10 minutes)
 // 3. Immediate Reactive Vulnerability Worker (event-driven queue)
+// 4. Daily Retention Worker (90-day retention)
 func (s *Scheduler) Start(ctx context.Context) {
 	log.Printf("[Scheduler] Starting background engines (Discovery: %v, Vulnerability: %v)",
 		s.cfg.DiscoveryInterval, s.cfg.VulnerabilityInterval)
 
-	s.wg.Add(3)
+	s.wg.Add(4)
 	go s.runDiscoveryWorker(ctx)
 	go s.runPeriodicVulnWorker(ctx)
 	go s.runImmediateVulnWorker(ctx)
+	go s.runRetentionWorker(ctx)
 }
 
 // Stop waits for all background goroutines to cleanly finish.
@@ -247,54 +250,80 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 
 	totalVulnsFound := 0
 	for _, res := range results {
-		dev, err := s.storage.GetDeviceByIP(ctx, res.IP)
-		if err != nil || dev == nil {
-			// If device wasn't in DB yet, upsert basic info
-			dev, _, _ = s.storage.UpsertDevice(ctx, &model.Device{
-				IP:       res.IP,
-				MAC:      res.MAC,
-				Hostname: res.Hostname,
-				Vendor:   res.Vendor,
-				Status:   "up",
-			})
-		}
-
-		if dev == nil {
-			continue
-		}
-
-		// Save Services
-		for _, svc := range res.Services {
-			svc.DeviceID = dev.ID
-			_, err := s.storage.UpsertService(ctx, &svc)
-			if err != nil {
-				log.Printf("[%s Scan] Error saving service %d for %s: %v", scanType, svc.Port, res.IP, err)
+		err := s.storage.WithTx(ctx, func(tx *storage.Tx) error {
+			dev, err := tx.GetDeviceByIP(ctx, res.IP)
+			if err != nil || dev == nil {
+				// If device wasn't in DB yet, upsert basic info
+				dev, _, err = tx.UpsertDevice(ctx, &model.Device{
+					IP:       res.IP,
+					MAC:      res.MAC,
+					Hostname: res.Hostname,
+					Vendor:   res.Vendor,
+					Status:   res.Status,
+				})
+				if err != nil {
+					return fmt.Errorf("upserting device %s: %w", res.IP, err)
+				}
 			}
-		}
 
-		// Save Vulnerabilities
-		for _, vuln := range res.Vulnerabilities {
-			vuln.DeviceID = dev.ID
-			_, _, err := s.storage.UpsertVulnerability(ctx, &vuln)
-			if err != nil {
-				log.Printf("[%s Scan] Error saving vuln %s for %s: %v", scanType, vuln.CVEID, res.IP, err)
-			} else {
-				totalVulnsFound++
+			if dev == nil {
+				return nil
 			}
-		}
 
-		// Record point-in-time observation with newly evaluated vulnerability posture
-		if scanLog != nil {
-			isVuln, vulnsCount, maxSev, _ := s.storage.GetDeviceSecurityPosture(ctx, dev.ID)
-			_ = s.storage.RecordDeviceScanObservation(ctx, &model.DeviceScanRecord{
-				DeviceID:     dev.ID,
-				ScanID:       scanLog.ID,
-				Status:       "up",
-				IsVulnerable: isVuln,
-				VulnsCount:   vulnsCount,
-				MaxSeverity:  maxSev,
-				RecordedAt:   time.Now().UTC(),
-			})
+			// Save Services
+			for _, svc := range res.Services {
+				svc.DeviceID = dev.ID
+				if _, err := tx.UpsertService(ctx, &svc); err != nil {
+					log.Printf("[%s Scan] Error saving service %d for %s: %v", scanType, svc.Port, res.IP, err)
+				}
+			}
+
+			// Save Vulnerabilities
+			for _, vuln := range res.Vulnerabilities {
+				vuln.DeviceID = dev.ID
+				if _, _, err := tx.UpsertVulnerability(ctx, &vuln); err != nil {
+					log.Printf("[%s Scan] Error saving vuln %s for %s: %v", scanType, vuln.CVEID, res.IP, err)
+				} else {
+					totalVulnsFound++
+				}
+			}
+
+			// Record point-in-time observation with newly evaluated vulnerability posture
+			if scanLog != nil {
+				hostStatus := res.Status
+				if hostStatus == "" {
+					hostStatus = "up"
+				}
+
+				// When unprivileged (-Pn), nmap marks every host up. Record up only if >= 1 port is open; otherwise skip the record.
+				if (s.scanner.Capabilities() != nil && s.scanner.Capabilities().EffectiveMode == "unprivileged") || s.cfg.ForceUnprivileged {
+					hasOpenPort := false
+					for _, svc := range res.Services {
+						if svc.State == "open" {
+							hasOpenPort = true
+							break
+						}
+					}
+					if !hasOpenPort {
+						return nil
+					}
+				}
+
+				isVuln, vulnsCount, maxSev, _ := tx.GetDeviceSecurityPosture(ctx, dev.ID)
+				_ = tx.RecordDeviceScanObservation(ctx, &model.DeviceScanRecord{
+					DeviceID:     dev.ID,
+					ScanID:       scanLog.ID,
+					Status:       hostStatus,
+					IsVulnerable: isVuln,
+					VulnsCount:   vulnsCount,
+					MaxSeverity:  maxSev,
+					RecordedAt:   time.Now().UTC(),
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("[%s Scan] Error persisting host %s: %v", scanType, res.IP, err)
 		}
 	}
 
@@ -380,4 +409,37 @@ func (s *Scheduler) GetNextRuns() (discTime, vulnTime *time.Time, discRunning, v
 	}
 
 	return dt, vt, s.discoveryRunning.Load(), s.vulnRunning.Load()
+}
+
+// -------------------------------------------------------------
+// Goroutine 4: Daily Retention Worker (Purge 90d data)
+// -------------------------------------------------------------
+func (s *Scheduler) runRetentionWorker(ctx context.Context) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	// Initial purge upon startup
+	recDeleted, scanDeleted, err := s.storage.PurgeOlderThan(ctx, 90*24*time.Hour, 90*24*time.Hour)
+	if err != nil {
+		log.Printf("[Retention Worker] Error during startup purge: %v", err)
+	} else if recDeleted > 0 || scanDeleted > 0 {
+		log.Printf("[Retention Worker] Startup purge removed %d records and %d scans", recDeleted, scanDeleted)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[Retention Worker] Shutting down.")
+			return
+		case <-ticker.C:
+			recDeleted, scanDeleted, err := s.storage.PurgeOlderThan(ctx, 90*24*time.Hour, 90*24*time.Hour)
+			if err != nil {
+				log.Printf("[Retention Worker] Error during purge: %v", err)
+			} else if recDeleted > 0 || scanDeleted > 0 {
+				log.Printf("[Retention Worker] Purged %d records and %d scans older than 90 days", recDeleted, scanDeleted)
+			}
+		}
+	}
 }

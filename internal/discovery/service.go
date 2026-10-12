@@ -36,7 +36,7 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner, onNew
 // Run executes a network discovery scan, stores live hosts, and immediately
 // triggers vulnerability scanning for any newly discovered host.
 func (s *Service) Run(ctx context.Context) ([]model.Device, error) {
-	start := time.Now()
+	start := time.Now().UTC()
 	targetSpec := s.cfg.NetworkCIDR
 	log.Printf("[Discovery] Starting host discovery on %s", targetSpec)
 
