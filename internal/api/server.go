@@ -16,20 +16,22 @@ import (
 	"github.com/gr0gu/cerberus/internal/detect"
 	"github.com/gr0gu/cerberus/internal/ingest"
 	"github.com/gr0gu/cerberus/internal/model"
+	"github.com/gr0gu/cerberus/internal/posture"
 	"github.com/gr0gu/cerberus/internal/scheduler"
 	"github.com/gr0gu/cerberus/internal/storage"
 )
 
 // Server encapsulates the HTTP API and its dependencies.
 type Server struct {
-	cfg          *config.Config
-	storage      *storage.Storage
-	scheduler    *scheduler.Scheduler
-	server       *http.Server
-	startTime    time.Time
-	capabilities *model.Capabilities
-	dispatcher   *ingest.Dispatcher
-	engine       *detect.Engine
+	cfg            *config.Config
+	storage        *storage.Storage
+	scheduler      *scheduler.Scheduler
+	server         *http.Server
+	startTime      time.Time
+	capabilities   *model.Capabilities
+	dispatcher     *ingest.Dispatcher
+	engine         *detect.Engine
+	postureService *posture.Service
 }
 
 // NewServer configures routes, middleware, and returns a new Server instance.
@@ -50,13 +52,14 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 	ingestHandler := ingest.NewHandler(cfg, store, dispatcher)
 
 	s := &Server{
-		cfg:          cfg,
-		storage:      store,
-		scheduler:    sched,
-		startTime:    time.Now().UTC(),
-		capabilities: c,
-		dispatcher:   dispatcher,
-		engine:       engine,
+		cfg:            cfg,
+		storage:        store,
+		scheduler:      sched,
+		startTime:      time.Now().UTC(),
+		capabilities:   c,
+		dispatcher:     dispatcher,
+		engine:         engine,
+		postureService: posture.NewService(store, posture.DefaultPolicy),
 	}
 
 	mux := http.NewServeMux()
@@ -78,6 +81,10 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 	mux.HandleFunc("POST /api/scans/vulnerability/trigger", s.handleTriggerVuln)
 	mux.HandleFunc("GET /api/status", s.handleGetStatus)
 	mux.HandleFunc("GET /api/export/json", s.handleExportJSON)
+
+	// Posture & CVSS Aggregator API (DEV-05)
+	mux.HandleFunc("GET /api/posture", s.handleGetPosture)
+	mux.HandleFunc("GET /api/posture/history", s.handleGetPostureHistory)
 
 	// Threat Incidents API (DEV-03)
 	mux.HandleFunc("GET /api/incidents", s.handleGetIncidents)
@@ -126,6 +133,16 @@ func (s *Server) SetCapabilities(caps *model.Capabilities) {
 // Capabilities returns the server's capability profile.
 func (s *Server) Capabilities() *model.Capabilities {
 	return s.capabilities
+}
+
+// SetPostureService configures or overrides the posture evaluation service.
+func (s *Server) SetPostureService(svc *posture.Service) {
+	s.postureService = svc
+}
+
+// PostureService returns the active posture evaluation service.
+func (s *Server) PostureService() *posture.Service {
+	return s.postureService
 }
 
 // Start runs the HTTP listener (blocking).

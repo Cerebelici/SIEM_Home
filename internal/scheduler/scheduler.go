@@ -12,6 +12,7 @@ import (
 	"github.com/gr0gu/cerberus/internal/discovery"
 	"github.com/gr0gu/cerberus/internal/identity"
 	"github.com/gr0gu/cerberus/internal/model"
+	"github.com/gr0gu/cerberus/internal/posture"
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/storage"
 )
@@ -23,6 +24,7 @@ type Scheduler struct {
 	scanner          *scanner.Scanner
 	discoveryService *discovery.Service
 	matcher          *identity.Matcher
+	postureService   *posture.Service
 
 	// Concurrency and scheduling
 	wg              sync.WaitGroup
@@ -47,6 +49,7 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 		storage:           store,
 		scanner:           scn,
 		matcher:           identity.NewMatcher(store, identity.DefaultWeights(), time.Now),
+		postureService:    posture.NewService(store, posture.DefaultPolicy),
 		immediateVulnCh:   make(chan string, 100),
 		manualDiscoveryCh: make(chan chan error, 5),
 		manualVulnCh:      make(chan chan error, 5),
@@ -57,6 +60,11 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 	s.storage.SetDiscoveryInterval(cfg.DiscoveryInterval)
 
 	return s
+}
+
+// SetPostureService assigns or overrides the posture evaluation service.
+func (s *Scheduler) SetPostureService(svc *posture.Service) {
+	s.postureService = svc
 }
 
 // EnqueueImmediateScan queues a target IP for an immediate on-demand vulnerability scan.
@@ -74,15 +82,17 @@ func (s *Scheduler) EnqueueImmediateScan(ip string) {
 // 2. Periodic Vulnerability Worker (cron: 10 minutes)
 // 3. Immediate Reactive Vulnerability Worker (event-driven queue)
 // 4. Daily Retention Worker (90-day retention)
+// 5. Hourly Posture Snapshot Worker
 func (s *Scheduler) Start(ctx context.Context) {
 	log.Printf("[Scheduler] Starting background engines (Discovery: %v, Vulnerability: %v)",
 		s.cfg.DiscoveryInterval, s.cfg.VulnerabilityInterval)
 
-	s.wg.Add(4)
+	s.wg.Add(5)
 	go s.runDiscoveryWorker(ctx)
 	go s.runPeriodicVulnWorker(ctx)
 	go s.runImmediateVulnWorker(ctx)
 	go s.runRetentionWorker(ctx)
+	go s.runPostureWorker(ctx)
 }
 
 // Stop waits for all background goroutines to cleanly finish.
@@ -349,6 +359,12 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 		_ = s.storage.UpdateScanLog(ctx, scanLog)
 	}
 
+	if s.postureService != nil {
+		if _, snapErr := s.postureService.Snapshot(ctx); snapErr != nil {
+			log.Printf("[%s Scan] Error creating posture snapshot: %v", scanType, snapErr)
+		}
+	}
+
 	return nil
 }
 
@@ -450,6 +466,37 @@ func (s *Scheduler) runRetentionWorker(ctx context.Context) {
 				log.Printf("[Retention Worker] Error during purge: %v", err)
 			} else if recDeleted > 0 || scanDeleted > 0 {
 				log.Printf("[Retention Worker] Purged %d records and %d scans older than 90 days", recDeleted, scanDeleted)
+			}
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// Goroutine 5: Hourly Posture Snapshot Worker
+// -------------------------------------------------------------
+func (s *Scheduler) runPostureWorker(ctx context.Context) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	// Initial snapshot on startup
+	if s.postureService != nil {
+		if _, err := s.postureService.Snapshot(ctx); err != nil {
+			log.Printf("[Posture Worker] Startup snapshot error: %v", err)
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[Posture Worker] Shutting down.")
+			return
+		case <-ticker.C:
+			if s.postureService != nil {
+				if _, err := s.postureService.Snapshot(ctx); err != nil {
+					log.Printf("[Posture Worker] Hourly snapshot error: %v", err)
+				}
 			}
 		}
 	}

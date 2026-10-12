@@ -21,6 +21,8 @@ type Device struct {
 	Label                string          `json:"label,omitempty"`
 	Criticality          string          `json:"criticality"` // "low", "normal", "high", "critical"
 	Notes                string          `json:"notes,omitempty"`
+	Risk                 float64         `json:"risk,omitempty"`
+	Score                float64         `json:"score,omitempty"`
 	ServicesCount        int             `json:"services_count"`
 	VulnerabilitiesCount int             `json:"vulnerabilities_count"`
 	Services             []Service       `json:"services,omitempty"`
@@ -145,6 +147,44 @@ type SystemStatus struct {
 	IngestEventsTotal    int64         `json:"ingest_events_total"`
 	DetectLagMsP95       float64       `json:"detect_lag_ms_p95"`
 	IncidentsOpen        int           `json:"incidents_open"`
+	FleetScore           *float64      `json:"fleet_score"`
+	PostureStatus        string        `json:"posture_status,omitempty"`
+}
+
+// DevicePostureSummary contains the calculated risk and score for a single device.
+type DevicePostureSummary struct {
+	DeviceID  int64   `json:"device_id"`
+	CurrentIP string  `json:"current_ip"`
+	Hostname  string  `json:"hostname,omitempty"`
+	Managed   bool    `json:"managed"`
+	Risk      float64 `json:"risk"`
+	Score     float64 `json:"score"`
+	OpenVulns int     `json:"open_vulns"`
+	MaxCVE    float64 `json:"max_cve"`
+}
+
+// PostureReport represents the calculated posture for the active fleet.
+type PostureReport struct {
+	ComputedAt    time.Time              `json:"computed_at"`
+	PolicyVersion string                 `json:"policy_version"`
+	FleetScore    *float64               `json:"fleet_score"`
+	PostureStatus string                 `json:"posture_status,omitempty"`
+	ActiveDevices int                    `json:"active_devices"`
+	MeanRisk      float64                `json:"mean_risk"`
+	MaxRisk       float64                `json:"max_risk"`
+	PenaltyTotal  float64                `json:"penalty_total"`
+	DeviceScores  []DevicePostureSummary `json:"device_scores"`
+}
+
+// PostureSnapshot represents a persisted posture snapshot in the database.
+type PostureSnapshot struct {
+	ID            int64          `json:"id"`
+	ComputedAt    time.Time      `json:"computed_at"`
+	PolicyVersion string         `json:"policy_version"`
+	FleetScore    *float64       `json:"fleet_score"`
+	ActiveDevices int            `json:"active_devices"`
+	DetailsJSON   string         `json:"-"`
+	Details       *PostureReport `json:"details,omitempty"`
 }
 
 // ExportData represents the complete network sentinel snapshot for JSON export.

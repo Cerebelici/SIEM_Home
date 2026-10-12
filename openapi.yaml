@@ -1330,6 +1330,66 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /api/posture:
+    get:
+      summary: Retrieve live fleet posture score
+      description: >
+        Calculates and returns the aggregated network posture score based on active hosts,
+        open deduplicated CVEs with CVSS weighting, exploitability multipliers, and 24h
+        security incident penalties. Cached for 30 seconds.
+      tags:
+        - posture
+      operationId: getPosture
+      responses:
+        '200':
+          description: Live fleet posture report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostureReport'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /api/posture/history:
+    get:
+      summary: Retrieve historical posture snapshots
+      description: >
+        Returns point-in-time posture evaluation snapshots within the requested time window.
+      tags:
+        - posture
+      operationId: getPostureHistory
+      parameters:
+        - name: from
+          in: query
+          description: RFC3339 lower bound timestamp.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: RFC3339 upper bound timestamp.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: List of posture snapshots.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  snapshots:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PostureSnapshot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
 components:
   schemas:
     Device:
@@ -1401,6 +1461,16 @@ components:
         notes:
           type: string
           description: Free-form operator notes.
+        risk:
+          type: number
+          format: double
+          description: Host security risk score R_h in [0, 10].
+          example: 6.4
+        score:
+          type: number
+          format: double
+          description: Host posture health score H_h in [0, 100].
+          example: 36.0
         first_seen:
           type: string
           format: date-time
@@ -1856,6 +1926,16 @@ components:
           type: integer
           description: Total count of active unresolved threat incidents.
           example: 2
+        fleet_score:
+          type: number
+          format: double
+          nullable: true
+          description: Overall fleet security posture score in [0, 100], or null if no active assets.
+          example: 87.5
+        posture_status:
+          type: string
+          description: Posture calculation status or reason (e.g. no_assets).
+          example: ""
 
     Capabilities:
       type: object
@@ -2393,6 +2473,120 @@ components:
           type: string
           description: Description of the error that occurred.
           example: device 42 not found
+
+    DevicePostureSummary:
+      type: object
+      required:
+        - device_id
+        - current_ip
+        - managed
+        - risk
+        - score
+        - open_vulns
+        - max_cve
+      properties:
+        device_id:
+          type: integer
+          format: int64
+          example: 1
+        current_ip:
+          type: string
+          example: 10.0.0.10
+        hostname:
+          type: string
+          example: web-server
+        managed:
+          type: boolean
+          example: true
+        risk:
+          type: number
+          format: double
+          example: 6.4
+        score:
+          type: number
+          format: double
+          example: 36.0
+        open_vulns:
+          type: integer
+          example: 3
+        max_cve:
+          type: number
+          format: double
+          example: 8.5
+
+    PostureReport:
+      type: object
+      required:
+        - computed_at
+        - policy_version
+        - active_devices
+        - mean_risk
+        - max_risk
+        - penalty_total
+        - device_scores
+      properties:
+        computed_at:
+          type: string
+          format: date-time
+        policy_version:
+          type: string
+          example: cvss-agg-v1
+        fleet_score:
+          type: number
+          format: double
+          nullable: true
+          example: 87.5
+        posture_status:
+          type: string
+          example: ""
+        active_devices:
+          type: integer
+          example: 12
+        mean_risk:
+          type: number
+          format: double
+          example: 3.2
+        max_risk:
+          type: number
+          format: double
+          example: 7.8
+        penalty_total:
+          type: number
+          format: double
+          example: 8.0
+        device_scores:
+          type: array
+          items:
+            $ref: '#/components/schemas/DevicePostureSummary'
+
+    PostureSnapshot:
+      type: object
+      required:
+        - id
+        - computed_at
+        - policy_version
+        - active_devices
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        computed_at:
+          type: string
+          format: date-time
+        policy_version:
+          type: string
+          example: cvss-agg-v1
+        fleet_score:
+          type: number
+          format: double
+          nullable: true
+          example: 87.5
+        active_devices:
+          type: integer
+          example: 12
+        details:
+          $ref: '#/components/schemas/PostureReport'
 
   responses:
     BadRequest:

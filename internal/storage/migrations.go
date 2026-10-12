@@ -368,6 +368,28 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 6,
+			up: func(tx *sql.Tx) error {
+				queries := []string{
+					`CREATE TABLE IF NOT EXISTS posture_snapshots (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						computed_at DATETIME NOT NULL,
+						policy_version TEXT NOT NULL,
+						fleet_score REAL,
+						active_devices INTEGER NOT NULL,
+						details_json TEXT NOT NULL
+					);`,
+					`CREATE INDEX IF NOT EXISTS idx_posture_time ON posture_snapshots(computed_at DESC);`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 6 query (%s): %w", q, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 }
 

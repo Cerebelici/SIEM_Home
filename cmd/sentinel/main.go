@@ -69,6 +69,7 @@ func main() {
 
 	// 5. Initialize Web Server and REST API
 	srv := api.NewServer(cfg, store, sched, caps)
+	sched.SetPostureService(srv.PostureService())
 
 	// Context for background goroutine lifecycle
 	ctx, cancel := context.WithCancel(context.Background())

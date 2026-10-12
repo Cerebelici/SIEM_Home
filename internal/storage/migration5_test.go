@@ -212,8 +212,8 @@ func TestMigration5_TableRebuildAndChildrenPreserved(t *testing.T) {
 	if err := s.RawReader().QueryRow("PRAGMA user_version;").Scan(&ver); err != nil {
 		t.Fatal(err)
 	}
-	if ver != 5 {
-		t.Fatalf("expected user_version=5, got %d", ver)
+	if ver < 5 {
+		t.Fatalf("expected user_version >= 5, got %d", ver)
 	}
 
 	// 2. PRAGMA foreign_key_check empty

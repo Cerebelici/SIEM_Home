@@ -28,6 +28,25 @@ func (s *Server) handleGetDevices(w http.ResponseWriter, r *http.Request) {
 		devices = []model.Device{}
 	}
 
+	if s.postureService != nil {
+		report, err := s.postureService.Compute(r.Context())
+		if err == nil && report != nil {
+			riskMap := make(map[int64]model.DevicePostureSummary, len(report.DeviceScores))
+			for _, ds := range report.DeviceScores {
+				riskMap[ds.DeviceID] = ds
+			}
+			for i := range devices {
+				if ds, ok := riskMap[devices[i].ID]; ok {
+					devices[i].Risk = ds.Risk
+					devices[i].Score = ds.Score
+				} else {
+					devices[i].Risk = 0.0
+					devices[i].Score = 100.0
+				}
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"count":   len(devices),
 		"devices": devices,
@@ -52,6 +71,25 @@ func (s *Server) handleGetDeviceByID(w http.ResponseWriter, r *http.Request) {
 	if device == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("device %d not found", id)})
 		return
+	}
+
+	if s.postureService != nil {
+		report, err := s.postureService.Compute(r.Context())
+		if err == nil && report != nil {
+			found := false
+			for _, ds := range report.DeviceScores {
+				if ds.DeviceID == device.ID {
+					device.Risk = ds.Risk
+					device.Score = ds.Score
+					found = true
+					break
+				}
+			}
+			if !found {
+				device.Risk = 0.0
+				device.Score = 100.0
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, device)
@@ -365,6 +403,14 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 		status.IncidentsOpen = s.engine.OpenIncidentsCount(r.Context())
 	}
 
+	if s.postureService != nil {
+		report, err := s.postureService.Compute(r.Context())
+		if err == nil && report != nil {
+			status.FleetScore = report.FleetScore
+			status.PostureStatus = report.PostureStatus
+		}
+	}
+
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -535,4 +581,60 @@ func (s *Server) handlePatchIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, inc)
+}
+
+// handleGetPosture returns the live fleet posture report (cached for 30 seconds).
+func (s *Server) handleGetPosture(w http.ResponseWriter, r *http.Request) {
+	if s.postureService == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "posture service not configured"})
+		return
+	}
+
+	report, err := s.postureService.Compute(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+// handleGetPostureHistory returns historical snapshots filtered by ?from=...&to=...
+func (s *Server) handleGetPostureHistory(w http.ResponseWriter, r *http.Request) {
+	if s.postureService == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "posture service not configured"})
+		return
+	}
+
+	var from, to time.Time
+	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
+		if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			from = t
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid from timestamp, must be RFC3339 format"})
+			return
+		}
+	}
+	if toStr := r.URL.Query().Get("to"); toStr != "" {
+		if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+			to = t
+		} else {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid to timestamp, must be RFC3339 format"})
+			return
+		}
+	}
+
+	history, err := s.postureService.GetHistory(r.Context(), from, to)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if history == nil {
+		history = []model.PostureSnapshot{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":     len(history),
+		"snapshots": history,
+	})
 }
