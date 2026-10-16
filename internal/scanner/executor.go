@@ -117,7 +117,7 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 		args = append(args, "-PS22,80,135,139,443,445,3389,8080", "-PA80,443")
 	}
 
-	args = append(args, "--exclude", "172.28.0.5,172.28.0.1")
+	args = append(args, "--exclude", "172.28.0.1,172.28.0.5")
 	args = append(args, target)
 
 	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)

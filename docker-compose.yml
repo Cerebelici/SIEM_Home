@@ -5,6 +5,7 @@ services:
     networks:
       sentinel-net:
         ipv4_address: 172.28.0.10
+        mac_address: 02:42:ac:1c:00:0a
 
   target-redis:
     image: redis:alpine
@@ -12,6 +13,7 @@ services:
     networks:
       sentinel-net:
         ipv4_address: 172.28.0.20
+        mac_address: 02:42:ac:1c:00:14
 
   target-dvwa:
     image: vulnerables/web-dvwa
@@ -19,6 +21,7 @@ services:
     networks:
       sentinel-net:
         ipv4_address: 172.28.0.30
+        mac_address: 02:42:ac:1c:00:1e
 
   sentinel:
     build: .
@@ -30,7 +33,7 @@ services:
       - CERBERUS_SUBNET=172.28.0.0/24
       - CERBERUS_DISCOVERY_INTERVAL=30m
       - CERBERUS_VULN_INTERVAL=10m
-      - CERBERUS_UNPRIVILEGED=true
+      - CERBERUS_UNPRIVILEGED=false
       - CERBERUS_MOCK_DATA=false
     volumes:
       - sentinel-data:/app/data
@@ -40,6 +43,7 @@ services:
     networks:
       sentinel-net:
         ipv4_address: 172.28.0.5
+        mac_address: 02:42:ac:1c:00:05
     depends_on:
       - target-nginx
       - target-redis
