@@ -70,6 +70,15 @@ func TestNormalize_Functions(t *testing.T) {
 	if j != 0.5 {
 		t.Errorf("expected Jaccard 0.5, got %f", j)
 	}
+
+	// 6. Fingerprint normalization & comparison
+	fps := NormalizeFingerprints([]string{" SSH-HOSTKEY:SHA256:ABC ", "ssl-cert:deadbeef", "ssh-hostkey:sha256:abc"})
+	if len(fps) != 2 {
+		t.Errorf("expected 2 deduplicated fingerprints, got %v", fps)
+	}
+	if !HasSharedFingerprint(fps, []string{"SSL-CERT:DEADBEEF"}) {
+		t.Errorf("expected shared fingerprint match")
+	}
 }
 
 func TestMatcher_DHCPMove(t *testing.T) {
@@ -173,6 +182,169 @@ func TestMatcher_RandomMAC(t *testing.T) {
 	}
 	if dec.Score != 70.0 {
 		t.Errorf("expected score 70.0, got %f", dec.Score)
+	}
+}
+
+func TestMatcher_Tier1_CryptoFingerprint(t *testing.T) {
+	// Device changes BOTH IP (.10 -> .88) and randomized MAC (da:11:... -> da:22:...),
+	// but presents the same SSH host key fingerprint -> Tier 1 deterministic bind!
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	dID := int64(101)
+
+	store := &fakeCandidateStore{
+		candidates: []Candidate{
+			{
+				ID:           dID,
+				CurrentIP:    "10.0.0.10",
+				MAC:          "da:11:22:33:44:55",
+				MACIsRandom:  true,
+				Fingerprints: []string{"ssh-hostkey:sha256:abcd1234efgh5678"},
+				LastSeen:     now.Add(-4 * time.Hour),
+			},
+		},
+	}
+
+	matcher := NewMatcher(store, DefaultWeights(), func() time.Time { return now })
+	dec, err := matcher.Resolve(context.Background(), Observation{
+		IP:           "10.0.0.88",
+		MAC:          "da:22:33:44:55:66",
+		Fingerprints: []string{"ssh-hostkey:sha256:abcd1234efgh5678"},
+		ObservedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if dec.Action != ActionBind || dec.DeviceID == nil || *dec.DeviceID != dID {
+		t.Fatalf("expected Tier 1 crypto_fingerprint bind to %d, got %+v", dID, dec)
+	}
+	if dec.Reason != "crypto_fingerprint" || dec.Score != 100.0 {
+		t.Errorf("expected reason crypto_fingerprint and score 100.0, got %s (%f)", dec.Reason, dec.Score)
+	}
+}
+
+func TestMatcher_Tier2_RandomMAC_DHCPMove(t *testing.T) {
+	// Phone/laptop with Per-SSID randomized MAC da:4b:53:93:3c:51 reconnects on a new DHCP IP (.15 -> .92)
+	// during a -sn discovery scan (no ports/hostname yet) -> scores 40 + 15 = 55 >= 50 -> binds to D!
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	laaMAC := "da:4b:53:93:3c:51"
+	dID := int64(102)
+
+	store := &fakeCandidateStore{
+		candidates: []Candidate{
+			{
+				ID:          dID,
+				CurrentIP:   "10.0.0.15",
+				MAC:         laaMAC,
+				MACIsRandom: true,
+				LastSeen:    now.Add(-3 * time.Hour),
+			},
+		},
+	}
+
+	matcher := NewMatcher(store, DefaultWeights(), func() time.Time { return now })
+	dec, err := matcher.Resolve(context.Background(), Observation{
+		IP:         "10.0.0.92",
+		MAC:        laaMAC,
+		ObservedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if dec.Action != ActionBind || dec.DeviceID == nil || *dec.DeviceID != dID {
+		t.Fatalf("expected Tier 2 Per-SSID LAA MAC bind to %d across DHCP move, got %+v", dID, dec)
+	}
+	if dec.Score != 55.0 {
+		t.Errorf("expected score 55.0 (40 MAC + 15 LAAMACMove), got %f", dec.Score)
+	}
+}
+
+func TestMatcher_Tier3_DeferredServiceMatchOverProvisionalStub(t *testing.T) {
+	// Device #10 (at .10) rotated its MAC and moved to .88.
+	// Discovery (-sn) created provisional stub #99 at .88 (Confidence 0.3, Ports empty).
+	// Vulnerability scan (-sV) then completes on .88 and reveals Hostname "media-srv" + Ports [80, 443].
+	// Matcher must bind to historical Device #10 instead of provisional stub #99.
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	origID := int64(10)
+	stubID := int64(99)
+
+	store := &fakeCandidateStore{
+		candidates: []Candidate{
+			{
+				ID:                 stubID,
+				CurrentIP:          "10.0.0.88",
+				MAC:                "da:99:88:77:66:55",
+				MACIsRandom:        true,
+				IdentityConfidence: 0.3,
+				Ports:              nil,
+				LastSeen:           now.Add(-5 * time.Second),
+			},
+			{
+				ID:                 origID,
+				CurrentIP:          "10.0.0.10",
+				MAC:                "da:11:22:33:44:55",
+				MACIsRandom:        true,
+				Hostname:           "media-srv",
+				Ports:              []string{"tcp/80/http", "tcp/443/https"},
+				IdentityConfidence: 0.8,
+				LastSeen:           now.Add(-2 * time.Hour),
+			},
+		},
+	}
+
+	matcher := NewMatcher(store, DefaultWeights(), func() time.Time { return now })
+	dec, err := matcher.Resolve(context.Background(), Observation{
+		IP:         "10.0.0.88",
+		MAC:        "da:99:88:77:66:55",
+		Hostname:   "media-srv",
+		Ports:      []string{"tcp/80/http", "tcp/443/https"},
+		ObservedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if dec.Action != ActionBind || dec.DeviceID == nil || *dec.DeviceID != origID {
+		t.Fatalf("expected Tier 3 deferred service match to original device %d, got %+v", origID, dec)
+	}
+	if dec.Reason != "deferred_service_match" {
+		t.Errorf("expected reason deferred_service_match, got %s", dec.Reason)
+	}
+}
+
+func TestMatcher_UnprivilegedIPOnlyLease(t *testing.T) {
+	// When running in unprivileged mode (-sT), Nmap may return an active IP with no MAC,
+	// no hostname, and no open ports yet. Within the 24h lease window, it must bind to the
+	// existing device at that IP (30 IPLease + 20 IPOnlyLease = 50) instead of duplicating.
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	dID := int64(200)
+
+	store := &fakeCandidateStore{
+		candidates: []Candidate{
+			{
+				ID:        dID,
+				CurrentIP: "172.28.0.50",
+				LastSeen:  now.Add(-10 * time.Minute),
+			},
+			{
+				ID:        int64(199),
+				CurrentIP: "172.28.0.50",
+				LastSeen:  now.Add(-20 * time.Minute),
+			},
+		},
+	}
+
+	matcher := NewMatcher(store, DefaultWeights(), func() time.Time { return now })
+	dec, err := matcher.Resolve(context.Background(), Observation{
+		IP:         "172.28.0.50",
+		ObservedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if dec.Action != ActionBind || dec.DeviceID == nil || *dec.DeviceID != dID {
+		t.Fatalf("expected bind to most recent device %d at 172.28.0.50, got %+v", dID, dec)
+	}
+	if dec.Score != 50.0 {
+		t.Errorf("expected score 50.0, got %f", dec.Score)
 	}
 }
 

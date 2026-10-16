@@ -15,8 +15,29 @@ It bridges the visibility gap between external network vulnerability scanning an
 - **In-Kernel Endpoint Observability**: Kernel eBPF hooks on process executions, IPv4/IPv6 socket connections, bash commands, `process_vm_writev` memory injections, ptrace, and sensitive file tampering with in-kernel noise filtering.
 - **Real-Time Threat Detection (IRT Engine)**: 10 deterministic security rules mapped to MITRE ATT&CK tactics and techniques, detecting reverse shells, webshells, cross-process injections, fileless executions, and root privilege escalations.
 - **Temporal Activity Timeline**: Segmented device availability and security posture tracking over time (`/api/timeline`) with carry-in state reconstruction and gap-free intervals.
-- **Asset Identity & Reconciliation**: Resolves DHCP lease shifts and OS MAC address randomization by matching managed agent interface telemetry, physical hardware MACs, and weighted heuristics (IP window, hostname, and port profiles).
+- **3-Tier Device Identification & Reconciliation**: Recognizes returning devices across dynamic DHCP IP changes and randomized Wi-Fi MAC addresses using digital service keys, per-Wi-Fi MAC persistence, and post-scan service matching.
 - **Fleet Security Posture (`cvss-agg-v1`)**: Deterministic scoring formula aggregating host CVSS scores with active exploit bonuses and deducting penalties for recent live incidents into a unified 0.0–100.0 fleet rating.
+
+---
+
+## How Cerberus Identifies Devices (3-Tier Identity Engine)
+
+In modern networks, a device's IP address can change whenever it reconnects (via DHCP), and phones or laptops often hide their real hardware MAC address using privacy randomization. To avoid creating duplicate records for the same device, Cerberus identifies devices in **three simple steps** (like checking a passport first, then a visitor badge, and finally a physical description):
+
+| Tier | Everyday Analogy | What Cerberus Checks | When It Is Used |
+|---|---|---|---|
+| **Tier 1: Digital Passport** | Checking a passport ID number | Permanent digital keys and IDs that never change when IP or MAC changes: `cerberus-agent` ID, SSH server keys (`ssh-hostkey`), HTTPS/SSL certificates (`ssl-cert`), or UPnP/SMB device UUIDs. | Gives **100% certainty** for managed Linux machines, servers, routers, printers, and smart devices—even if both IP and MAC change. |
+| **Tier 2: Hardware & Per-Wi-Fi MAC** | Checking a building visitor badge | Real factory MAC addresses (for wired PCs, servers, IoT) **or** the per-Wi-Fi private MAC address that modern phones and laptops (iOS, Android, Windows, macOS) reuse on the same Wi-Fi network. | Immediately recognizes phones, laptops, and wired devices during the fast discovery scan (`-sn`) whenever the router gives them a **new IP address**. |
+| **Tier 3: Post-Scan Service & Name Match** | Recognizing someone by their name and profile | Local DNS hostname combined with the list of open ports/services discovered after the port scan (`-sV`) finishes. | Catches devices that changed **both** their IP and MAC address at the same time, and automatically merges any temporary discovery record back into the original device. |
+
+### How the Two-Step Scan Works Together
+1. **Step 1 — Fast Discovery (`RunDiscoveryScan`, `-sn`)**: Cerberus quickly checks which IP addresses are online and resolves their local hostnames. If a device matches **Tier 1** (active agent) or **Tier 2** (same hardware MAC or same per-Wi-Fi private MAC on a new IP), Cerberus immediately links it to the existing device. If the IP and MAC are both completely unfamiliar, Cerberus creates a temporary record and triggers an immediate port scan.
+2. **Step 2 — Deep Service & Key Check (`RunVulnerabilityScan`, `-sV`)**: Cerberus scans the device's open ports, security vulnerabilities, and digital keys (SSH keys, SSL certificates). Once this scan finishes, Cerberus re-checks the device against offline history: if its digital keys (**Tier 1**) or its hostname + open ports (**Tier 3**) match an earlier device, Cerberus automatically merges the temporary record into the original device so all timeline history and alerts stay in one place.
+
+### Built-In Safeguards Against Duplicate Devices
+- **Ignoring Ghost Hosts in Unprivileged Mode (`-Pn`)**: When running without raw-socket privileges (`CERBERUS_UNPRIVILEGED=true`), Nmap uses `-Pn`, which reports every scanned IP as "online" even if no device is actually listening there. Cerberus filters out any `-Pn` result that has both zero open ports and no MAC address *before* running identity matching, so offline or old mock IPs (such as `172.28.0.50` from initial seed data) never create phantom device records.
+- **Handling Scans Without MAC Addresses**: When Nmap scans across a network where MAC addresses aren't visible (such as unprivileged TCP scans or local container interfaces), Cerberus keeps linking the scan result to the active device holding that IP lease (`IPLease + IPOnlyLease`) rather than creating a new device on every scan.
+- **One Active Device Per IP**: Cerberus deduplicates target IPs before every scan and automatically marks any older device record at the same IP as `down` when a new device takes over that address, preventing duplicate entries from accumulating.
 
 ---
 
@@ -163,7 +184,7 @@ sudo ./proc_exec \
 ```
 
 #### Step 4: Asset Reconciliation in Action
-- **Unmanaged Devices** (phones, printers, smart TVs): Sentinel tracks them via ARP/MAC, open port fingerprints, and DHCP lease history.
+- **Unmanaged Devices** (phones, printers, smart TVs): Sentinel tracks them via digital service keys (SSH/TLS/UPnP), per-Wi-Fi MAC persistence, open port profiles, and DHCP lease history.
 - **Managed Endpoints**: The agent self-reports its network interfaces and machine UUID. When Sentinel sweeps the LAN, the Identity Matcher correlates wire observations with internal agent telemetry.
 
 ---

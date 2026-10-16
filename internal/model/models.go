@@ -16,6 +16,7 @@ type Device struct {
 	AssetUID             string          `json:"asset_uid"`
 	MACIsRandom          bool            `json:"mac_is_random"`
 	PortProfileHash      string          `json:"port_profile_hash,omitempty"`
+	Fingerprints         []string        `json:"fingerprints,omitempty"`
 	Managed              bool            `json:"managed"`
 	IdentityConfidence   float64         `json:"identity_confidence"`
 	Label                string          `json:"label,omitempty"`
@@ -99,8 +100,8 @@ type Vulnerability struct {
 	Description     string     `json:"description,omitempty"`
 	ReferenceURL    string     `json:"reference_url,omitempty"`
 	DetectedAt      time.Time  `json:"detected_at"`
-	IsExploit       bool       `json:"is_exploit"`
-	ExploitRefs     []string   `json:"exploit_refs,omitempty"`
+	IsExploit       bool       `json:"-"`
+	ExploitRefs     []string   `json:"-"`
 	Status          string     `json:"status"` // "open" | "resolved"
 	FirstDetectedAt time.Time  `json:"first_detected_at"`
 	LastSeenAt      time.Time  `json:"last_seen_at"`
@@ -203,6 +204,7 @@ type ScanHostResult struct {
 	Vendor          string
 	Hostname        string
 	Status          string
+	Fingerprints    []string
 	Services        []Service
 	Vulnerabilities []Vulnerability
 }

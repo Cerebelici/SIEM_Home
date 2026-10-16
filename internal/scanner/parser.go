@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,7 +13,10 @@ import (
 )
 
 var (
-	anchoredCVERegex = regexp.MustCompile(`(CVE-\d{4}-\d{4,7})(?:\s+(10(?:\.0)?|\d\.\d)\b)?`)
+	anchoredCVERegex   = regexp.MustCompile(`(CVE-\d{4}-\d{4,7})(?:\s+(10(?:\.0)?|\d\.\d)\b)?`)
+	sshSHA256TextRegex = regexp.MustCompile(`(?i)\bSHA256:([A-Za-z0-9+/=_-]{16,})`)
+	sslSHA256TextRegex = regexp.MustCompile(`(?i)SHA-?256:\s*([0-9a-fA-F:\s]{32,})`)
+	uuidTextRegex      = regexp.MustCompile(`(?i)\b([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b`)
 )
 
 // ParseNmapXML unmarshals raw XML bytes into NmapRun.
@@ -57,19 +61,22 @@ func ExtractDevices(run *NmapRun) []model.Device {
 			continue
 		}
 
+		fps := extractFingerprintsFromScripts(host.HostScripts)
+
 		devices = append(devices, model.Device{
-			IP:       ip,
-			MAC:      mac,
-			Hostname: hostname,
-			Vendor:   vendor,
-			Status:   "up",
+			IP:           ip,
+			MAC:          mac,
+			Hostname:     hostname,
+			Vendor:       vendor,
+			Fingerprints: fps,
+			Status:       "up",
 		})
 	}
 
 	return devices
 }
 
-// ExtractHostResults parses ports, services, and vulnerabilities for all hosts.
+// ExtractHostResults parses ports, services, cryptographic fingerprints, and vulnerabilities for all hosts.
 func ExtractHostResults(run *NmapRun) []model.ScanHostResult {
 	var results []model.ScanHostResult
 
@@ -100,6 +107,11 @@ func ExtractHostResults(run *NmapRun) []model.ScanHostResult {
 
 		var services []model.Service
 		var vulns []model.Vulnerability
+		fpSet := make(map[string]bool)
+
+		for _, fp := range extractFingerprintsFromScripts(host.HostScripts) {
+			fpSet[fp] = true
+		}
 
 		for _, p := range host.Ports {
 			svcState := p.State.State
@@ -121,7 +133,18 @@ func ExtractHostResults(run *NmapRun) []model.ScanHostResult {
 			// Parse vulnerabilities from scripts
 			extractedVulns := extractVulnerabilitiesFromScripts(ip, p.PortID, p.Scripts)
 			vulns = append(vulns, extractedVulns...)
+
+			// Parse Tier 1 cryptographic and hardware fingerprints from scripts
+			for _, fp := range extractFingerprintsFromScripts(p.Scripts) {
+				fpSet[fp] = true
+			}
 		}
+
+		var fingerprints []string
+		for fp := range fpSet {
+			fingerprints = append(fingerprints, fp)
+		}
+		sort.Strings(fingerprints)
 
 		results = append(results, model.ScanHostResult{
 			IP:              ip,
@@ -129,12 +152,98 @@ func ExtractHostResults(run *NmapRun) []model.ScanHostResult {
 			Vendor:          vendor,
 			Hostname:        hostname,
 			Status:          host.Status.State,
+			Fingerprints:    fingerprints,
 			Services:        services,
 			Vulnerabilities: vulns,
 		})
 	}
 
 	return results
+}
+
+func extractFingerprintsFromScripts(scripts []NmapScript) []string {
+	if len(scripts) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	addFP := func(prefix, val string) {
+		val = strings.ToLower(strings.TrimSpace(val))
+		val = strings.ReplaceAll(val, " ", "")
+		if val == "" {
+			return
+		}
+		token := fmt.Sprintf("%s:%s", prefix, val)
+		seen[token] = true
+	}
+
+	for _, script := range scripts {
+		id := strings.ToLower(strings.TrimSpace(script.ID))
+		switch id {
+		case "ssh-hostkey":
+			for _, tbl := range script.Tables {
+				var fpVal string
+				for _, elem := range tbl.Elems {
+					if strings.EqualFold(elem.Key, "fingerprint") && elem.Value != "" {
+						fpVal = elem.Value
+					}
+				}
+				if fpVal != "" {
+					addFP("ssh-hostkey", fpVal)
+				}
+			}
+			for _, elem := range script.Elems {
+				if strings.EqualFold(elem.Key, "fingerprint") && elem.Value != "" {
+					addFP("ssh-hostkey", elem.Value)
+				}
+			}
+			for _, m := range sshSHA256TextRegex.FindAllStringSubmatch(script.Output, -1) {
+				if len(m) > 1 {
+					addFP("ssh-hostkey", m[1])
+				}
+			}
+
+		case "ssl-cert":
+			for _, elem := range script.Elems {
+				if strings.EqualFold(elem.Key, "sha256") || strings.EqualFold(elem.Key, "sha1") {
+					addFP("ssl-cert", elem.Value)
+				}
+			}
+			for _, tbl := range script.Tables {
+				for _, elem := range tbl.Elems {
+					if strings.EqualFold(elem.Key, "sha256") || strings.EqualFold(elem.Key, "sha1") {
+						addFP("ssl-cert", elem.Value)
+					}
+				}
+			}
+			for _, m := range sslSHA256TextRegex.FindAllStringSubmatch(script.Output, -1) {
+				if len(m) > 1 {
+					addFP("ssl-cert", strings.ReplaceAll(m[1], ":", ""))
+				}
+			}
+
+		case "smb2-capabilities", "smb-os-discovery", "upnp-info", "nbstat":
+			for _, elem := range script.Elems {
+				if strings.EqualFold(elem.Key, "guid") || strings.EqualFold(elem.Key, "uuid") || strings.EqualFold(elem.Key, "mac") {
+					addFP(id, elem.Value)
+				}
+			}
+			for _, m := range uuidTextRegex.FindAllStringSubmatch(script.Output, -1) {
+				if len(m) > 1 {
+					addFP(id, m[1])
+				}
+			}
+		}
+	}
+
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for fp := range seen {
+		out = append(out, fp)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func extractVulnerabilitiesFromScripts(ip string, port int, scripts []NmapScript) []model.Vulnerability {

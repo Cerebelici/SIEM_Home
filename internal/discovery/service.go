@@ -71,10 +71,11 @@ func (s *Service) Run(ctx context.Context) ([]model.Device, error) {
 
 	for i := range devices {
 		obs := identity.Observation{
-			IP:         devices[i].IP,
-			MAC:        devices[i].MAC,
-			Hostname:   devices[i].Hostname,
-			ObservedAt: start,
+			IP:           devices[i].IP,
+			MAC:          devices[i].MAC,
+			Hostname:     devices[i].Hostname,
+			Fingerprints: devices[i].Fingerprints,
+			ObservedAt:   start,
 		}
 		dec, err := s.matcher.Resolve(ctx, obs)
 		if err != nil {

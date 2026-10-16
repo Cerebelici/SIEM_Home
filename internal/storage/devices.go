@@ -13,6 +13,82 @@ import (
 	"github.com/gr0gu/cerberus/internal/model"
 )
 
+func parseFingerprintsColumn(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	return identity.NormalizeFingerprints(parts)
+}
+
+func formatFingerprintsColumn(fps []string) string {
+	norm := identity.NormalizeFingerprints(fps)
+	if len(norm) == 0 {
+		return ""
+	}
+	return strings.Join(norm, ",")
+}
+
+func mergeDeviceRowsInternal(ctx context.Context, eq execQuerier, targetID, sourceID int64) error {
+	if targetID == sourceID {
+		return nil
+	}
+	var sourceManaged int
+	var sourceFPs string
+	if err := eq.QueryRowContext(ctx, `SELECT managed, COALESCE(fingerprints, '') FROM devices WHERE id = ?;`, sourceID).Scan(&sourceManaged, &sourceFPs); err != nil {
+		return err
+	}
+
+	// Re-parent services
+	_, _ = eq.ExecContext(ctx, `UPDATE OR IGNORE services SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
+	_, _ = eq.ExecContext(ctx, `DELETE FROM services WHERE device_id = ?;`, sourceID)
+
+	// Re-parent vulnerabilities
+	_, _ = eq.ExecContext(ctx, `UPDATE OR IGNORE vulnerabilities SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
+	_, _ = eq.ExecContext(ctx, `DELETE FROM vulnerabilities WHERE device_id = ?;`, sourceID)
+
+	// Re-parent scan records
+	_, _ = eq.ExecContext(ctx, `UPDATE device_scan_records SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
+
+	// Re-parent addresses
+	_, _ = eq.ExecContext(ctx, `UPDATE device_addresses SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
+
+	// Re-parent agents
+	_, _ = eq.ExecContext(ctx, `UPDATE agents SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
+
+	// Re-parent incidents
+	_, _ = eq.ExecContext(ctx, `UPDATE incidents SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
+
+	// Re-parent identity decisions
+	_, _ = eq.ExecContext(ctx, `UPDATE identity_decisions SET chosen_device_id = ? WHERE chosen_device_id = ?;`, targetID, sourceID)
+	_, _ = eq.ExecContext(ctx, `UPDATE identity_decisions SET runner_up_device_id = ? WHERE runner_up_device_id = ?;`, targetID, sourceID)
+
+	// Merge fingerprints if source had any
+	if sourceFPs != "" {
+		var targetFPs string
+		_ = eq.QueryRowContext(ctx, `SELECT COALESCE(fingerprints, '') FROM devices WHERE id = ?;`, targetID).Scan(&targetFPs)
+		combined := append(parseFingerprintsColumn(targetFPs), parseFingerprintsColumn(sourceFPs)...)
+		_, _ = eq.ExecContext(ctx, `UPDATE devices SET fingerprints = ? WHERE id = ?;`, formatFingerprintsColumn(combined), targetID)
+	}
+
+	// If source was managed, target becomes managed
+	if sourceManaged == 1 {
+		_, _ = eq.ExecContext(ctx, `UPDATE devices SET managed = 1 WHERE id = ?;`, targetID)
+	}
+
+	// Delete source device
+	res, err := eq.ExecContext(ctx, `DELETE FROM devices WHERE id = ?;`, sourceID)
+	if err != nil {
+		return fmt.Errorf("deleting source device: %w", err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // UpsertDevice inserts a new device or updates last_seen/metadata of an existing one.
 func (s *Storage) UpsertDevice(ctx context.Context, dev *model.Device) (*model.Device, bool, error) {
 	return upsertDeviceInternal(ctx, s.w, dev)
@@ -39,18 +115,19 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 	var macIsRandom int
 	var managed int
 	var identityConfidence float64
-	var label, criticality, notes string
+	var label, criticality, notes, existingFPs string
 
 	querySelect := `SELECT id, first_seen, asset_uid, mac_is_random, managed, identity_confidence,
-		COALESCE(label, ''), criticality, COALESCE(notes, '')
+		COALESCE(label, ''), criticality, COALESCE(notes, ''), COALESCE(fingerprints, '')
 		FROM devices WHERE current_ip = ? LIMIT 1;`
 	err := eq.QueryRowContext(ctx, querySelect, ip).Scan(
 		&existingID, &firstSeen, &assetUID, &macIsRandom, &managed, &identityConfidence,
-		&label, &criticality, &notes,
+		&label, &criticality, &notes, &existingFPs,
 	)
 
 	normMAC := identity.NormalizeMAC(dev.MAC)
 	normHost := identity.NormalizeHostname(dev.Hostname)
+	normFPs := identity.NormalizeFingerprints(dev.Fingerprints)
 	isRandom := 0
 	if normMAC != "" && identity.IsLocallyAdministered(normMAC) {
 		isRandom = 1
@@ -76,13 +153,13 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 
 		insertQuery := `INSERT INTO devices (
 			current_ip, mac, hostname, vendor, status, first_seen, last_seen,
-			asset_uid, mac_is_random, port_profile_hash, managed, identity_confidence,
+			asset_uid, mac_is_random, port_profile_hash, fingerprints, managed, identity_confidence,
 			label, criticality, notes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, ?, ?, ?, ?);`
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?);`
 
 		res, err := eq.ExecContext(ctx, insertQuery,
 			ip, normMAC, normHost, dev.Vendor, status, now, now,
-			newAssetUID, isRandom, conf, dev.Label, crit, dev.Notes,
+			newAssetUID, isRandom, formatFingerprintsColumn(normFPs), conf, dev.Label, crit, dev.Notes,
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf("inserting device: %w", err)
@@ -94,6 +171,7 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 		dev.IP = ip
 		dev.AssetUID = newAssetUID
 		dev.MACIsRandom = (isRandom == 1)
+		dev.Fingerprints = normFPs
 		dev.FirstSeen = now
 		dev.LastSeen = now
 		dev.Status = status
@@ -114,17 +192,21 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 		status = "up"
 	}
 
+	combinedFPs := identity.NormalizeFingerprints(append(parseFingerprintsColumn(existingFPs), normFPs...))
+
 	updateQuery := `UPDATE devices SET
 		last_seen = ?,
 		status = ?,
 		mac = CASE WHEN ? != '' THEN ? ELSE mac END,
 		mac_is_random = CASE WHEN ? != '' THEN ? ELSE mac_is_random END,
 		hostname = CASE WHEN ? != '' THEN ? ELSE hostname END,
-		vendor = CASE WHEN ? != '' THEN ? ELSE vendor END
+		vendor = CASE WHEN ? != '' THEN ? ELSE vendor END,
+		fingerprints = ?
 		WHERE id = ?;`
 
 	_, err = eq.ExecContext(ctx, updateQuery,
-		now, status, normMAC, normMAC, normMAC, isRandom, normHost, normHost, dev.Vendor, dev.Vendor, existingID,
+		now, status, normMAC, normMAC, normMAC, isRandom, normHost, normHost, dev.Vendor, dev.Vendor,
+		formatFingerprintsColumn(combinedFPs), existingID,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("updating device: %w", err)
@@ -139,6 +221,7 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 	dev.IP = ip
 	dev.AssetUID = assetUID
 	dev.MACIsRandom = (macIsRandom == 1)
+	dev.Fingerprints = combinedFPs
 	dev.Managed = (managed == 1)
 	dev.IdentityConfidence = identityConfidence
 	dev.Label = label
@@ -154,7 +237,7 @@ func upsertDeviceInternal(ctx context.Context, eq execQuerier, dev *model.Device
 func (s *Storage) GetDevices(ctx context.Context, statusFilter string) ([]model.Device, error) {
 	query := `SELECT d.id, d.current_ip, COALESCE(d.mac, ''), COALESCE(d.hostname, ''), COALESCE(d.vendor, ''),
 		d.status, d.first_seen, d.last_seen, d.asset_uid, d.mac_is_random, COALESCE(d.port_profile_hash, ''),
-		d.managed, d.identity_confidence, COALESCE(d.label, ''), d.criticality, COALESCE(d.notes, ''),
+		COALESCE(d.fingerprints, ''), d.managed, d.identity_confidence, COALESCE(d.label, ''), d.criticality, COALESCE(d.notes, ''),
 		(SELECT COUNT(*) FROM services s WHERE s.device_id = d.id AND s.state = 'open') as services_count,
 		(SELECT COUNT(*) FROM vulnerabilities v WHERE v.device_id = d.id AND v.status = 'open') as vulns_count
 		FROM devices d`
@@ -179,16 +262,18 @@ func (s *Storage) GetDevices(ctx context.Context, statusFilter string) ([]model.
 	for rows.Next() {
 		var d model.Device
 		var macIsRandomInt, managedInt int
+		var fpsRaw string
 		if err := rows.Scan(
 			&d.ID, &d.CurrentIP, &d.MAC, &d.Hostname, &d.Vendor,
 			&d.Status, &d.FirstSeen, &d.LastSeen, &d.AssetUID, &macIsRandomInt, &d.PortProfileHash,
-			&managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
+			&fpsRaw, &managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
 			&d.ServicesCount, &d.VulnerabilitiesCount,
 		); err != nil {
 			return nil, fmt.Errorf("scanning device row: %w", err)
 		}
 		d.IP = d.CurrentIP
 		d.MACIsRandom = (macIsRandomInt == 1)
+		d.Fingerprints = parseFingerprintsColumn(fpsRaw)
 		d.Managed = (managedInt == 1)
 		devices = append(devices, d)
 	}
@@ -200,15 +285,16 @@ func (s *Storage) GetDevices(ctx context.Context, statusFilter string) ([]model.
 func (s *Storage) GetDeviceByID(ctx context.Context, id int64) (*model.Device, error) {
 	query := `SELECT id, current_ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''),
 		status, first_seen, last_seen, asset_uid, mac_is_random, COALESCE(port_profile_hash, ''),
-		managed, identity_confidence, COALESCE(label, ''), criticality, COALESCE(notes, '')
+		COALESCE(fingerprints, ''), managed, identity_confidence, COALESCE(label, ''), criticality, COALESCE(notes, '')
 		FROM devices WHERE id = ?;`
 
 	var d model.Device
 	var macIsRandomInt, managedInt int
+	var fpsRaw string
 	err := s.r.QueryRowContext(ctx, query, id).Scan(
 		&d.ID, &d.CurrentIP, &d.MAC, &d.Hostname, &d.Vendor,
 		&d.Status, &d.FirstSeen, &d.LastSeen, &d.AssetUID, &macIsRandomInt, &d.PortProfileHash,
-		&managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
+		&fpsRaw, &managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -217,6 +303,7 @@ func (s *Storage) GetDeviceByID(ctx context.Context, id int64) (*model.Device, e
 	}
 	d.IP = d.CurrentIP
 	d.MACIsRandom = (macIsRandomInt == 1)
+	d.Fingerprints = parseFingerprintsColumn(fpsRaw)
 	d.Managed = (managedInt == 1)
 
 	services, err := s.getServicesForDevice(ctx, d.ID, d.CurrentIP)
@@ -249,15 +336,16 @@ func (t *Tx) GetDeviceByIP(ctx context.Context, ip string) (*model.Device, error
 func getDeviceByIPQuery(ctx context.Context, eq execQuerier, ip string) (*model.Device, error) {
 	query := `SELECT id, current_ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''),
 		status, first_seen, last_seen, asset_uid, mac_is_random, COALESCE(port_profile_hash, ''),
-		managed, identity_confidence, COALESCE(label, ''), criticality, COALESCE(notes, '')
+		COALESCE(fingerprints, ''), managed, identity_confidence, COALESCE(label, ''), criticality, COALESCE(notes, '')
 		FROM devices WHERE current_ip = ? ORDER BY last_seen DESC LIMIT 1;`
 
 	var d model.Device
 	var macIsRandomInt, managedInt int
+	var fpsRaw string
 	err := eq.QueryRowContext(ctx, query, ip).Scan(
 		&d.ID, &d.CurrentIP, &d.MAC, &d.Hostname, &d.Vendor,
 		&d.Status, &d.FirstSeen, &d.LastSeen, &d.AssetUID, &macIsRandomInt, &d.PortProfileHash,
-		&managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
+		&fpsRaw, &managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -266,14 +354,15 @@ func getDeviceByIPQuery(ctx context.Context, eq execQuerier, ip string) (*model.
 	}
 	d.IP = d.CurrentIP
 	d.MACIsRandom = (macIsRandomInt == 1)
+	d.Fingerprints = parseFingerprintsColumn(fpsRaw)
 	d.Managed = (managedInt == 1)
 
 	return &d, nil
 }
 
-// GetActiveDeviceIPs returns IPs of devices marked as 'up'.
+// GetActiveDeviceIPs returns distinct IPs of devices marked as 'up'.
 func (s *Storage) GetActiveDeviceIPs(ctx context.Context) ([]string, error) {
-	rows, err := s.r.QueryContext(ctx, `SELECT current_ip FROM devices WHERE status = 'up' ORDER BY last_seen DESC;`)
+	rows, err := s.r.QueryContext(ctx, `SELECT current_ip FROM devices WHERE status = 'up' GROUP BY current_ip ORDER BY MAX(last_seen) DESC;`)
 	if err != nil {
 		return nil, fmt.Errorf("querying active device IPs: %w", err)
 	}
@@ -358,7 +447,7 @@ func (t *Tx) GetCandidates(ctx context.Context, window time.Duration) ([]identit
 func getCandidatesInternal(ctx context.Context, eq execQuerier, window time.Duration) ([]identity.Candidate, error) {
 	now := time.Now().UTC()
 	query := `SELECT id, asset_uid, current_ip, COALESCE(mac, ''), mac_is_random, COALESCE(hostname, ''),
-		managed, identity_confidence, last_seen
+		COALESCE(fingerprints, ''), managed, identity_confidence, last_seen
 		FROM devices`
 	var rows *sql.Rows
 	var err error
@@ -379,13 +468,15 @@ func getCandidatesInternal(ctx context.Context, eq execQuerier, window time.Dura
 	for rows.Next() {
 		var c identity.Candidate
 		var macIsRand, managedInt int
+		var fpsRaw string
 		if err := rows.Scan(
 			&c.ID, &c.AssetUID, &c.CurrentIP, &c.MAC, &macIsRand, &c.Hostname,
-			&managedInt, &c.IdentityConfidence, &c.LastSeen,
+			&fpsRaw, &managedInt, &c.IdentityConfidence, &c.LastSeen,
 		); err != nil {
 			return nil, fmt.Errorf("scanning candidate: %w", err)
 		}
 		c.MACIsRandom = (macIsRand == 1)
+		c.Fingerprints = parseFingerprintsColumn(fpsRaw)
 		c.Managed = (managedInt == 1)
 		candidates = append(candidates, c)
 	}
@@ -466,6 +557,7 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 
 	normMAC := identity.NormalizeMAC(obs.MAC)
 	normHost := identity.NormalizeHostname(obs.Hostname)
+	normFPs := identity.NormalizeFingerprints(obs.Fingerprints)
 	isRandom := 0
 	if normMAC != "" && identity.IsLocallyAdministered(normMAC) {
 		isRandom = 1
@@ -479,16 +571,48 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 			return nil, fmt.Errorf("action bind missing device_id")
 		}
 		targetID := *dec.DeviceID
+
+		// Tier 3 Auto-Reconciliation: If a provisional discovery stub (identity_confidence <= 0.35,
+		// unmanaged, 0 services, non-conflicting MAC) was created at obs.IP during a -sn sweep
+		// before RunVulnerabilityScan resolved obs to targetID, merge that stub into targetID.
+		stubRows, err := eq.QueryContext(ctx, `
+			SELECT d.id, COALESCE(d.mac, '')
+			FROM devices d
+			WHERE d.id != ?
+			  AND d.current_ip = ?
+			  AND d.managed = 0
+			  AND d.identity_confidence <= 0.35
+			  AND (SELECT COUNT(*) FROM services s WHERE s.device_id = d.id) = 0;`,
+			targetID, obs.IP,
+		)
+		if err == nil {
+			var stubsToMerge []int64
+			for stubRows.Next() {
+				var stubID int64
+				var stubMAC string
+				if err := stubRows.Scan(&stubID, &stubMAC); err == nil {
+					if stubMAC == "" || normMAC == "" || stubMAC == normMAC {
+						stubsToMerge = append(stubsToMerge, stubID)
+					}
+				}
+			}
+			stubRows.Close()
+			for _, stubID := range stubsToMerge {
+				_ = mergeDeviceRowsInternal(ctx, eq, targetID, stubID)
+			}
+		}
+
 		var d model.Device
 		var macIsRandomInt, managedInt int
+		var fpsRaw string
 		querySelect := `SELECT id, current_ip, COALESCE(mac, ''), COALESCE(hostname, ''), COALESCE(vendor, ''),
 			status, first_seen, last_seen, asset_uid, mac_is_random, COALESCE(port_profile_hash, ''),
-			managed, identity_confidence, COALESCE(label, ''), criticality, COALESCE(notes, '')
+			COALESCE(fingerprints, ''), managed, identity_confidence, COALESCE(label, ''), criticality, COALESCE(notes, '')
 			FROM devices WHERE id = ?;`
-		err := eq.QueryRowContext(ctx, querySelect, targetID).Scan(
+		err = eq.QueryRowContext(ctx, querySelect, targetID).Scan(
 			&d.ID, &d.CurrentIP, &d.MAC, &d.Hostname, &d.Vendor,
 			&d.Status, &d.FirstSeen, &d.LastSeen, &d.AssetUID, &macIsRandomInt, &d.PortProfileHash,
-			&managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
+			&fpsRaw, &managedInt, &d.IdentityConfidence, &d.Label, &d.Criticality, &d.Notes,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("fetching bound device %d: %w", targetID, err)
@@ -499,12 +623,13 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 		d.Status = "up"
 		d.Managed = (managedInt == 1)
 		d.MACIsRandom = (macIsRandomInt == 1)
+		d.Fingerprints = identity.NormalizeFingerprints(append(parseFingerprintsColumn(fpsRaw), normFPs...))
 
-		if d.MAC == "" && normMAC != "" {
+		if normMAC != "" && (d.MAC == "" || d.MACIsRandom) {
 			d.MAC = normMAC
 			d.MACIsRandom = (isRandom == 1)
 		}
-		if d.Hostname == "" && normHost != "" {
+		if normHost != "" && d.Hostname == "" {
 			d.Hostname = normHost
 		}
 		if dec.Confidence > d.IdentityConfidence {
@@ -525,9 +650,13 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 			mac = ?,
 			mac_is_random = ?,
 			hostname = ?,
+			fingerprints = ?,
 			identity_confidence = ?
 			WHERE id = ?;`
-		if _, err := eq.ExecContext(ctx, updateQuery, obs.IP, observedAt, macVal, macRandVal, hostVal, d.IdentityConfidence, targetID); err != nil {
+		if _, err := eq.ExecContext(ctx, updateQuery,
+			obs.IP, observedAt, macVal, macRandVal, hostVal,
+			formatFingerprintsColumn(d.Fingerprints), d.IdentityConfidence, targetID,
+		); err != nil {
 			return nil, fmt.Errorf("updating bound device: %w", err)
 		}
 
@@ -562,21 +691,22 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 
 		insertQuery := `INSERT INTO devices (
 			current_ip, mac, hostname, vendor, status, first_seen, last_seen,
-			asset_uid, mac_is_random, port_profile_hash, managed, identity_confidence,
+			asset_uid, mac_is_random, port_profile_hash, fingerprints, managed, identity_confidence,
 			label, criticality, notes
-		) VALUES (?, ?, ?, '', 'up', ?, ?, ?, ?, '', 0, ?, '', 'normal', '');`
+		) VALUES (?, ?, ?, '', 'up', ?, ?, ?, ?, '', ?, 0, ?, '', 'normal', '');`
 
 		res, err := eq.ExecContext(ctx, insertQuery,
 			obs.IP, normMAC, normHost, observedAt, observedAt,
-			newAssetUID, isRandom, conf,
+			newAssetUID, isRandom, formatFingerprintsColumn(normFPs), conf,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("inserting new device from decision: %w", err)
 		}
 		newID, _ := res.LastInsertId()
 
-		// Close any other device's open lease for this IP
+		// Close any other device's open lease for this IP and mark displaced devices at this IP as down
 		_, _ = eq.ExecContext(ctx, `UPDATE device_addresses SET closed = 1 WHERE ip = ? AND device_id != ? AND closed = 0;`, obs.IP, newID)
+		_, _ = eq.ExecContext(ctx, `UPDATE devices SET status = 'down' WHERE current_ip = ? AND id != ? AND status = 'up';`, obs.IP, newID)
 
 		// Open lease for new device
 		_, _ = eq.ExecContext(ctx, `INSERT INTO device_addresses (device_id, ip, mac, first_seen, last_seen, closed)
@@ -599,6 +729,7 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 			MAC:                normMAC,
 			MACIsRandom:        (isRandom == 1),
 			Hostname:           normHost,
+			Fingerprints:       normFPs,
 			Status:             "up",
 			FirstSeen:          observedAt,
 			LastSeen:           observedAt,
@@ -622,51 +753,7 @@ func (s *Storage) MergeDevices(ctx context.Context, targetID, sourceID int64) er
 		if err := tx.tx.QueryRowContext(ctx, `SELECT 1 FROM devices WHERE id = ?;`, targetID).Scan(&targetExists); err != nil {
 			return fmt.Errorf("target device %d not found: %w", targetID, err)
 		}
-		var sourceManaged int
-		if err := tx.tx.QueryRowContext(ctx, `SELECT managed FROM devices WHERE id = ?;`, sourceID).Scan(&sourceManaged); err != nil {
-			return fmt.Errorf("source device %d not found: %w", sourceID, err)
-		}
-
-		// Re-parent services
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE OR IGNORE services SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
-		_, _ = tx.tx.ExecContext(ctx, `DELETE FROM services WHERE device_id = ?;`, sourceID)
-
-		// Re-parent vulnerabilities
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE OR IGNORE vulnerabilities SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
-		_, _ = tx.tx.ExecContext(ctx, `DELETE FROM vulnerabilities WHERE device_id = ?;`, sourceID)
-
-		// Re-parent scan records
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE device_scan_records SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
-
-		// Re-parent addresses
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE device_addresses SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
-
-		// Re-parent agents
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE agents SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
-
-		// Re-parent incidents
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE incidents SET device_id = ? WHERE device_id = ?;`, targetID, sourceID)
-
-		// Re-parent identity decisions
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE identity_decisions SET chosen_device_id = ? WHERE chosen_device_id = ?;`, targetID, sourceID)
-		_, _ = tx.tx.ExecContext(ctx, `UPDATE identity_decisions SET runner_up_device_id = ? WHERE runner_up_device_id = ?;`, targetID, sourceID)
-
-		// If source was managed, target becomes managed
-		if sourceManaged == 1 {
-			_, _ = tx.tx.ExecContext(ctx, `UPDATE devices SET managed = 1 WHERE id = ?;`, targetID)
-		}
-
-		// Delete source device
-		res, err := tx.tx.ExecContext(ctx, `DELETE FROM devices WHERE id = ?;`, sourceID)
-		if err != nil {
-			return fmt.Errorf("deleting source device: %w", err)
-		}
-		rows, _ := res.RowsAffected()
-		if rows == 0 {
-			return sql.ErrNoRows
-		}
-
-		return nil
+		return mergeDeviceRowsInternal(ctx, tx.tx, targetID, sourceID)
 	})
 }
 
@@ -880,9 +967,84 @@ func bindAgentInternal(ctx context.Context, eq execQuerier, agentID string, inte
 
 	var hostname string
 	var enrolledAt time.Time
-	err := eq.QueryRowContext(ctx, `SELECT hostname, enrolled_at FROM agents WHERE agent_id = ?;`, agentID).Scan(&hostname, &enrolledAt)
+	var existingDevID sql.NullInt64
+	err := eq.QueryRowContext(ctx, `SELECT hostname, enrolled_at, device_id FROM agents WHERE agent_id = ?;`, agentID).Scan(&hostname, &enrolledAt, &existingDevID)
 	if err != nil {
 		return fmt.Errorf("fetching agent: %w", err)
+	}
+
+	// Determine primary IP and MAC from interfaces
+	var primaryIP, primaryMAC string
+	for _, iface := range interfaces {
+		for _, ip := range iface.IPv4 {
+			if ip != "" && !strings.HasPrefix(ip, "127.") {
+				primaryIP = ip
+				primaryMAC = identity.NormalizeMAC(iface.MAC)
+				break
+			}
+		}
+		if primaryIP != "" {
+			break
+		}
+	}
+	if primaryIP == "" && len(interfaces) > 0 {
+		for _, iface := range interfaces {
+			for _, ip := range iface.IPv6 {
+				if ip != "" && ip != "::1" {
+					primaryIP = ip
+					primaryMAC = identity.NormalizeMAC(iface.MAC)
+					break
+				}
+			}
+			if primaryIP != "" {
+				break
+			}
+		}
+	}
+
+	// If the agent is already bound to a valid device, preserve that binding across DHCP IP changes
+	// and merge any transient unmanaged record that may have been created at the new IP.
+	if existingDevID.Valid && existingDevID.Int64 > 0 {
+		var exists int
+		if err := eq.QueryRowContext(ctx, `SELECT 1 FROM devices WHERE id = ?;`, existingDevID.Int64).Scan(&exists); err == nil {
+			boundID := existingDevID.Int64
+			if primaryIP != "" {
+				// Merge any transient unmanaged device sitting at primaryIP
+				var transientID int64
+				if err := eq.QueryRowContext(ctx,
+					`SELECT id FROM devices WHERE id != ? AND current_ip = ? AND managed = 0 LIMIT 1;`,
+					boundID, primaryIP,
+				).Scan(&transientID); err == nil && transientID > 0 {
+					_ = mergeDeviceRowsInternal(ctx, eq, boundID, transientID)
+				}
+
+				isRandom := 0
+				if primaryMAC != "" && identity.IsLocallyAdministered(primaryMAC) {
+					isRandom = 1
+				}
+				_, _ = eq.ExecContext(ctx, `UPDATE devices SET
+					current_ip = ?,
+					last_seen = ?,
+					status = 'up',
+					managed = 1,
+					identity_confidence = 1.0,
+					mac = CASE WHEN ? != '' THEN ? ELSE mac END,
+					mac_is_random = CASE WHEN ? != '' THEN ? ELSE mac_is_random END,
+					hostname = CASE WHEN ? != '' THEN ? ELSE hostname END
+					WHERE id = ?;`,
+					primaryIP, now, primaryMAC, primaryMAC, primaryMAC, isRandom, hostname, hostname, boundID,
+				)
+				_, _ = eq.ExecContext(ctx, `UPDATE device_addresses SET closed = 1 WHERE ip = ? AND device_id != ? AND closed = 0;`, primaryIP, boundID)
+				var addrID int64
+				if err := eq.QueryRowContext(ctx, `SELECT id FROM device_addresses WHERE device_id = ? AND ip = ? AND closed = 0 LIMIT 1;`, boundID, primaryIP).Scan(&addrID); err == sql.ErrNoRows {
+					_, _ = eq.ExecContext(ctx, `INSERT INTO device_addresses (device_id, ip, mac, first_seen, last_seen, closed) VALUES (?, ?, ?, ?, ?, 0);`,
+						boundID, primaryIP, primaryMAC, now, now)
+				} else if err == nil {
+					_, _ = eq.ExecContext(ctx, `UPDATE device_addresses SET last_seen = ? WHERE id = ?;`, now, addrID)
+				}
+			}
+			return nil
+		}
 	}
 
 	var boundDeviceID int64
@@ -918,41 +1080,13 @@ func bindAgentInternal(ctx context.Context, eq execQuerier, agentID string, inte
 		if err != nil {
 			return fmt.Errorf("binding agent to device %d: %w", boundDeviceID, err)
 		}
-		_, err = eq.ExecContext(ctx, `UPDATE devices SET managed = 1 WHERE id = ?;`, boundDeviceID)
+		_, err = eq.ExecContext(ctx, `UPDATE devices SET managed = 1, identity_confidence = 1.0 WHERE id = ?;`, boundDeviceID)
 		if err != nil {
 			return fmt.Errorf("marking device %d managed: %w", boundDeviceID, err)
 		}
 		return nil
 	}
 
-	// Create managed device from primary interface
-	var primaryIP, primaryMAC string
-	for _, iface := range interfaces {
-		for _, ip := range iface.IPv4 {
-			if ip != "" && !strings.HasPrefix(ip, "127.") {
-				primaryIP = ip
-				primaryMAC = identity.NormalizeMAC(iface.MAC)
-				break
-			}
-		}
-		if primaryIP != "" {
-			break
-		}
-	}
-	if primaryIP == "" && len(interfaces) > 0 {
-		for _, iface := range interfaces {
-			for _, ip := range iface.IPv6 {
-				if ip != "" && ip != "::1" {
-					primaryIP = ip
-					primaryMAC = identity.NormalizeMAC(iface.MAC)
-					break
-				}
-			}
-			if primaryIP != "" {
-				break
-			}
-		}
-	}
 	if primaryIP == "" {
 		return nil
 	}

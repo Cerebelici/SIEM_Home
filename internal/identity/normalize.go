@@ -142,3 +142,48 @@ func Jaccard(a, b []string) float64 {
 	return float64(intersection) / float64(union)
 }
 
+// NormalizeFingerprints standardizes, deduplicates, and sorts cryptographic/hardware device fingerprints
+// (such as "ssh-hostkey:sha256:...", "ssl-cert:sha256:...", "smb-guid:...", "upnp-uuid:...").
+func NormalizeFingerprints(fps []string) []string {
+	if len(fps) == 0 {
+		return []string{}
+	}
+
+	seen := make(map[string]bool, len(fps))
+	var out []string
+	for _, raw := range fps {
+		fp := strings.ToLower(strings.TrimSpace(raw))
+		if fp == "" {
+			continue
+		}
+		if !seen[fp] {
+			seen[fp] = true
+			out = append(out, fp)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HasSharedFingerprint returns true if two fingerprint slices share at least one normalized fingerprint.
+func HasSharedFingerprint(a, b []string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	normA := NormalizeFingerprints(a)
+	normB := NormalizeFingerprints(b)
+	if len(normA) == 0 || len(normB) == 0 {
+		return false
+	}
+
+	setA := make(map[string]bool, len(normA))
+	for _, item := range normA {
+		setA[item] = true
+	}
+	for _, item := range normB {
+		if setA[item] {
+			return true
+		}
+	}
+	return false
+}

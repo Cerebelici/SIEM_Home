@@ -94,6 +94,7 @@ func isCompleteNmapOutput(output []byte) bool {
 }
 
 // RunDiscoveryScan executes an Nmap host discovery scan against target CIDR.
+// Note: reverse DNS resolution is enabled (no -n flag) so live hosts report their local DNS/router hostnames.
 func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.Device, error) {
 	if strings.HasPrefix(target, "-") {
 		return nil, fmt.Errorf("invalid discovery target %q: target must not begin with '-'", target)
@@ -106,7 +107,6 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 
 	args := []string{
 		"-sn",
-		"-n",
 		"-T4",
 		"--max-retries", "2",
 		"--host-timeout", "10m",
@@ -117,6 +117,7 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 		args = append(args, "-PS22,80,135,139,443,445,3389,8080", "-PA80,443")
 	}
 
+	args = append(args, "--exclude", "172.28.0.5,172.28.0.1")
 	args = append(args, target)
 
 	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)
@@ -136,7 +137,7 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 	return devices, nil
 }
 
-// RunVulnerabilityScan executes service detection and vulnerability scripts against target IPs.
+// RunVulnerabilityScan executes service detection, cryptographic identity scripts, and vulnerability scripts against target IPs.
 func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([]model.ScanHostResult, error) {
 	if len(targets) == 0 {
 		return nil, nil
@@ -157,6 +158,10 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 	if vulnScript == "" {
 		vulnScript = "vulners"
 	}
+	scriptSpec := vulnScript
+	if !strings.Contains(scriptSpec, "ssh-hostkey") {
+		scriptSpec += ",ssh-hostkey,ssl-cert"
+	}
 
 	args := []string{
 		"-sV",
@@ -164,8 +169,7 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 		"-T4",
 		"--max-retries", "2",
 		"--host-timeout", "10m",
-		"--script", vulnScript,
-		"-n",
+		"--script", scriptSpec,
 		"-oX", "-",
 	}
 
@@ -173,6 +177,7 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 		args = append(args, "-sT", "-Pn")
 	}
 
+	args = append(args, "--exclude", "172.28.0.5,172.28.0.1")
 	args = append(args, targets...)
 
 	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)

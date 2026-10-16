@@ -390,6 +390,20 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 7,
+			up: func(tx *sql.Tx) error {
+				queries := []string{
+					`ALTER TABLE devices ADD COLUMN fingerprints TEXT NOT NULL DEFAULT '';`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 7 query (%s): %w", q, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 }
 

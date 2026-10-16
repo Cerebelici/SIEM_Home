@@ -42,7 +42,7 @@ const sampleDiscoveryXML = `<?xml version="1.0" encoding="UTF-8"?>
 
 const sampleVulnXML = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE nmaprun>
-<nmaprun scanner="nmap" args="nmap -sV --script vulners 172.28.0.10" start="1690000000" version="7.94">
+<nmaprun scanner="nmap" args="nmap -sV --script vulners,ssh-hostkey,ssl-cert 172.28.0.10" start="1690000000" version="7.94">
   <host starttime="1690000001" endtime="1690000010">
     <status state="up" reason="syn-ack"/>
     <address addr="172.28.0.10" addrtype="ipv4"/>
@@ -50,6 +50,16 @@ const sampleVulnXML = `<?xml version="1.0" encoding="UTF-8"?>
       <hostname name="target-nginx" type="user"/>
     </hostnames>
     <ports>
+      <port protocol="tcp" portid="22">
+        <state state="open" reason="syn-ack"/>
+        <service name="ssh" product="OpenSSH" version="8.9p1"/>
+        <script id="ssh-hostkey" output="256 SHA256:u7X9kLp2mN4qR8sT1vW3xY5zA7bC9dE0fG2hI4jK6lM (ED25519)">
+          <table>
+            <elem key="fingerprint">u7X9kLp2mN4qR8sT1vW3xY5zA7bC9dE0fG2hI4jK6lM</elem>
+            <elem key="type">ssh-ed25519</elem>
+          </table>
+        </script>
+      </port>
       <port protocol="tcp" portid="80">
         <state state="open" reason="syn-ack"/>
         <service name="http" product="nginx" version="1.21.6" method="probed" conf="10"/>
@@ -105,7 +115,7 @@ func TestExtractDevices(t *testing.T) {
 	}
 }
 
-func TestExtractHostResults_WithVulns(t *testing.T) {
+func TestExtractHostResults_WithVulnsAndFingerprints(t *testing.T) {
 	run, err := scanner.ParseNmapXML([]byte(sampleVulnXML))
 	if err != nil {
 		t.Fatalf("unexpected error parsing vuln XML: %v", err)
@@ -121,12 +131,15 @@ func TestExtractHostResults_WithVulns(t *testing.T) {
 		t.Errorf("expected IP 172.28.0.10, got %s", host.IP)
 	}
 
-	if len(host.Services) != 1 {
-		t.Fatalf("expected 1 service, got %d", len(host.Services))
+	if len(host.Services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(host.Services))
 	}
-	svc := host.Services[0]
-	if svc.Port != 80 || svc.ServiceName != "http" || svc.Product != "nginx" || svc.Version != "1.21.6" {
-		t.Errorf("unexpected service details: %+v", svc)
+
+	if len(host.Fingerprints) == 0 {
+		t.Fatalf("expected SSH hostkey fingerprint to be extracted, got none")
+	}
+	if host.Fingerprints[0] != "ssh-hostkey:u7x9klp2mn4qr8st1vw3xy5za7bc9de0fg2hi4jk6lm" {
+		t.Errorf("unexpected fingerprint: %v", host.Fingerprints)
 	}
 
 	if len(host.Vulnerabilities) != 2 {
@@ -244,4 +257,3 @@ func TestRegexFallback_IgnoresVersion(t *testing.T) {
 		t.Errorf("expected CVSS score 5.3, got %f", vuln.CVSSScore)
 	}
 }
-

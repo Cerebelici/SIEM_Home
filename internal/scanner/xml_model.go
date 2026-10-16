@@ -15,12 +15,13 @@ type NmapRun struct {
 
 // NmapHost represents a single scanned host.
 type NmapHost struct {
-	StartTime int64          `xml:"starttime,attr"`
-	EndTime   int64          `xml:"endtime,attr"`
-	Status    NmapStatus     `xml:"status"`
-	Addresses []NmapAddress  `xml:"address"`
-	Hostnames []NmapHostname `xml:"hostnames>hostname"`
-	Ports     []NmapPort     `xml:"ports>port"`
+	StartTime   int64          `xml:"starttime,attr"`
+	EndTime     int64          `xml:"endtime,attr"`
+	Status      NmapStatus     `xml:"status"`
+	Addresses   []NmapAddress  `xml:"address"`
+	Hostnames   []NmapHostname `xml:"hostnames>hostname"`
+	Ports       []NmapPort     `xml:"ports>port"`
+	HostScripts []NmapScript   `xml:"hostscript>script"`
 }
 
 // NmapStatus represents host up/down status.

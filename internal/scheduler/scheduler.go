@@ -219,6 +219,9 @@ func (s *Scheduler) runImmediateVulnWorker(ctx context.Context) {
 			log.Printf("[Immediate Vuln Worker] 🚀 Launching immediate scan on newly discovered host %s", ip)
 			go func(targetIP string) {
 				defer s.activeTargets.Delete(targetIP)
+				// Allow newly booted endpoints a short window to finish binding ports
+				time.Sleep(3 * time.Second)
+
 				// Create an execution context bounded by ScanTimeout
 				scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
 				defer cancel()
@@ -235,6 +238,20 @@ func (s *Scheduler) runImmediateVulnWorker(ctx context.Context) {
 // Target Scanner Execution & DB Persistence
 // -------------------------------------------------------------
 func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType string) error {
+	// Deduplicate target IPs so a single scan never probes the same IP multiple times
+	seenTargets := make(map[string]bool, len(targets))
+	dedupedTargets := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if t != "" && !seenTargets[t] {
+			seenTargets[t] = true
+			dedupedTargets = append(dedupedTargets, t)
+		}
+	}
+	targets = dedupedTargets
+	if len(targets) == 0 {
+		return nil
+	}
+
 	start := time.Now()
 	targetSpec := fmt.Sprintf("%v", targets)
 
@@ -261,15 +278,31 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 		return scanErr
 	}
 
+	isUnprivileged := (s.scanner.Capabilities() != nil && s.scanner.Capabilities().EffectiveMode == "unprivileged") || s.cfg.ForceUnprivileged
+
 	totalVulnsFound := 0
 	for _, res := range results {
+		var observedPorts []int
+		for _, svc := range res.Services {
+			if svc.State == "open" || svc.State == "" {
+				observedPorts = append(observedPorts, svc.Port)
+			}
+		}
+
+		// When unprivileged (-Pn), Nmap marks every target IP as "up" even if no host is listening.
+		// Skip the host BEFORE calling matcher.Resolve / ApplyDecision if 0 ports are open and no MAC was seen.
+		if isUnprivileged && len(observedPorts) == 0 && res.MAC == "" {
+			continue
+		}
+
 		portProfile, _ := identity.PortProfile(res.Services)
 		obs := identity.Observation{
-			IP:         res.IP,
-			MAC:        res.MAC,
-			Hostname:   res.Hostname,
-			Ports:      portProfile,
-			ObservedAt: start,
+			IP:           res.IP,
+			MAC:          res.MAC,
+			Hostname:     res.Hostname,
+			Ports:        portProfile,
+			Fingerprints: res.Fingerprints,
+			ObservedAt:   start,
 		}
 		dec, err := s.matcher.Resolve(ctx, obs)
 		if err != nil {
@@ -287,14 +320,10 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 			}
 
 			// Save Services
-			var observedPorts []int
 			for _, svc := range res.Services {
 				svc.DeviceID = dev.ID
 				if _, err := tx.UpsertService(ctx, &svc); err != nil {
 					log.Printf("[%s Scan] Error saving service %d for %s: %v", scanType, svc.Port, res.IP, err)
-				}
-				if svc.State == "open" {
-					observedPorts = append(observedPorts, svc.Port)
 				}
 			}
 
@@ -311,14 +340,6 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 			hostStatus := res.Status
 			if hostStatus == "" {
 				hostStatus = "up"
-			}
-
-			// When unprivileged (-Pn), nmap marks every host up. Record up only if >= 1 port is open; otherwise skip the record.
-			if (s.scanner.Capabilities() != nil && s.scanner.Capabilities().EffectiveMode == "unprivileged") || s.cfg.ForceUnprivileged {
-				hasOpenPort := len(observedPorts) > 0
-				if !hasOpenPort {
-					return nil
-				}
 			}
 
 			// Reconcile host findings if host is up
