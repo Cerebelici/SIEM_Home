@@ -138,6 +138,7 @@ services:
       - CERBERUS_VULN_INTERVAL=2m
       - CERBERUS_UNPRIVILEGED=false
       - CERBERUS_MOCK_DATA=false
+      - CERBERUS_SCAN_PORTS=--top-ports 2000
     volumes:
       - sentinel-data:/app/data
     cap_add:

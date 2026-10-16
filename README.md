@@ -204,6 +204,8 @@ Key settings can be configured via environment variables:
 | `CERBERUS_ENROLL_TOKEN` | Pre-shared token required for agent enrollment | *Empty* |
 | `CERBERUS_API_KEY` | Operator API key for administrative CRUD operations | *Empty* |
 | `CERBERUS_UNPRIVILEGED` | Force unprivileged TCP connect scan fallback | `true` |
+| `CERBERUS_SCAN_PORTS` | Port range or option for vulnerability audit (e.g. `1-10000`, `21,22,80,3000,6379,8080`, `--top-ports 2000`) | `--top-ports 2000` |
+| `CERBERUS_IMMEDIATE_DELAY` | Cooldown grace period before scanning newly booted hosts | `3s` |
 | `CERBERUS_SCAN_TIMEOUT` | Maximum execution timeout per scan job | `15m` |
 
 ---

@@ -220,7 +220,9 @@ func (s *Scheduler) runImmediateVulnWorker(ctx context.Context) {
 			go func(targetIP string) {
 				defer s.activeTargets.Delete(targetIP)
 				// Allow newly booted endpoints a short window to finish binding ports
-				time.Sleep(3 * time.Second)
+				if s.cfg != nil && s.cfg.ImmediateScanDelay > 0 {
+					time.Sleep(s.cfg.ImmediateScanDelay)
+				}
 
 				// Create an execution context bounded by ScanTimeout
 				scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)

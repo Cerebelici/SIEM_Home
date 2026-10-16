@@ -25,6 +25,8 @@ type Config struct {
 	IngestShards          int
 	EventRetention        time.Duration
 	APIKey                string
+	ScanPorts             string
+	ImmediateScanDelay    time.Duration
 }
 
 // Load returns configuration populated with defaults and overridden by environment variables.
@@ -46,6 +48,8 @@ func Load() *Config {
 		IngestShards:          getEnvInt("CERBERUS_INGEST_SHARDS", runtime.GOMAXPROCS(0)),
 		EventRetention:        getEnvDuration("CERBERUS_EVENT_RETENTION", 168*time.Hour),
 		APIKey:                getEnv("CERBERUS_API_KEY", ""),
+		ScanPorts:             getEnv("CERBERUS_SCAN_PORTS", ""),
+		ImmediateScanDelay:    getEnvDuration("CERBERUS_IMMEDIATE_DELAY", 3*time.Second),
 	}
 
 	return cfg

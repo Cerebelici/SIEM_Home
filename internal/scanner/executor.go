@@ -114,7 +114,7 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 	}
 
 	if s.isUnprivileged() {
-		args = append(args, "-PS22,80,135,139,443,445,3389,8080", "-PA80,443")
+		args = append(args, "-PS21,22,80,135,139,443,445,3000,3389,6379,8080", "-PA80,443")
 	}
 
 	args = append(args, "--exclude", "172.28.0.1,172.28.0.5")
@@ -175,6 +175,29 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 
 	if s.isUnprivileged() {
 		args = append(args, "-sT", "-Pn")
+	}
+
+	// Port specification: use configurable scan ports or default to top 2000 ports
+	scanPorts := ""
+	if s.cfg != nil {
+		scanPorts = strings.TrimSpace(s.cfg.ScanPorts)
+	}
+
+	if scanPorts != "" {
+		if strings.HasPrefix(scanPorts, "--top-ports ") {
+			args = append(args, "--top-ports", strings.TrimSpace(strings.TrimPrefix(scanPorts, "--top-ports ")))
+		} else if strings.HasPrefix(scanPorts, "--top-ports=") {
+			args = append(args, "--top-ports", strings.TrimSpace(strings.TrimPrefix(scanPorts, "--top-ports=")))
+		} else if strings.HasPrefix(scanPorts, "-p ") {
+			args = append(args, "-p", strings.TrimSpace(strings.TrimPrefix(scanPorts, "-p ")))
+		} else if strings.HasPrefix(scanPorts, "-p") && len(scanPorts) > 2 && scanPorts[2] != ' ' {
+			args = append(args, "-p", strings.TrimSpace(strings.TrimPrefix(scanPorts, "-p")))
+		} else {
+			args = append(args, "-p", scanPorts)
+		}
+	} else {
+		// Default to top 2000 ports so services like Redis (6379, rank 1923) and custom apps (3000, 8080) are audited
+		args = append(args, "--top-ports", "2000")
 	}
 
 	args = append(args, "--exclude", "172.28.0.5,172.28.0.1")
