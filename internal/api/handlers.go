@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -338,29 +339,65 @@ func (s *Server) handleGetScans(w http.ResponseWriter, r *http.Request) {
 
 // handleTriggerDiscovery launches an immediate network discovery scan.
 func (s *Server) handleTriggerDiscovery(w http.ResponseWriter, r *http.Request) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ScanTimeout)
-		defer cancel()
-		_ = s.scheduler.TriggerDiscovery(ctx)
-	}()
-
-	writeJSON(w, http.StatusAccepted, map[string]string{
-		"message": "Discovery scan initiated in background",
-		"status":  "running",
-	})
+	s.dispatchManualScan(w, scanTypeDiscovery, "Discovery scan initiated in background")
 }
 
 // handleTriggerVuln launches an immediate vulnerability scan across active devices.
 func (s *Server) handleTriggerVuln(w http.ResponseWriter, r *http.Request) {
+	s.dispatchManualScan(w, scanTypeVulnerability, "Vulnerability audit initiated in background")
+}
+
+const (
+	scanTypeDiscovery     = "discovery"
+	scanTypeVulnerability = "vulnerability"
+)
+
+// dispatchManualScan is the shared contract for both trigger endpoints:
+//   - 202 Accepted: request handed to the scheduler worker (body: message, status, scan_type)
+//   - 409 Conflict: a scan of the same type is already running (body: error, status, scan_type)
+//   - 503 Service Unavailable: no scheduler is wired into the server
+//
+// Worker-side failures are logged instead of silently discarded; clients observe the
+// final outcome through GET /api/status (is_*_running) and GET /api/scans (scan log).
+func (s *Server) dispatchManualScan(w http.ResponseWriter, scanType, message string) {
+	if s.scheduler == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error":     "scan scheduler is not available",
+			"status":    "unavailable",
+			"scan_type": scanType,
+		})
+		return
+	}
+
+	_, _, discRunning, vulnRunning := s.scheduler.GetNextRuns()
+	running := discRunning
+	trigger := s.scheduler.TriggerDiscovery
+	if scanType == scanTypeVulnerability {
+		running = vulnRunning
+		trigger = s.scheduler.TriggerVulnerabilityScan
+	}
+
+	if running {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":     fmt.Sprintf("%s scan already in progress", scanType),
+			"status":    "running",
+			"scan_type": scanType,
+		})
+		return
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ScanTimeout)
 		defer cancel()
-		_ = s.scheduler.TriggerVulnerabilityScan(ctx)
+		if err := trigger(ctx); err != nil {
+			log.Printf("[API] Manual %s scan finished with error: %v", scanType, err)
+		}
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
-		"message": "Vulnerability audit initiated in background",
-		"status":  "running",
+		"message":   message,
+		"status":    "running",
+		"scan_type": scanType,
 	})
 }
 

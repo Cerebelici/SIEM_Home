@@ -880,6 +880,27 @@ paths:
               example:
                 message: Discovery scan initiated in background
                 status: running
+                scan_type: discovery
+        '409':
+          description: A discovery scan is already in progress; the request was not queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: discovery scan already in progress
+                status: running
+                scan_type: discovery
+        '503':
+          description: The scan scheduler is not available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: scan scheduler is not available
+                status: unavailable
+                scan_type: discovery
         '500':
           $ref: '#/components/responses/InternalServerError'
       x-codeSamples:
@@ -922,6 +943,27 @@ paths:
               example:
                 message: Vulnerability audit initiated in background
                 status: running
+                scan_type: vulnerability
+        '409':
+          description: A vulnerability scan is already in progress; the request was not queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: vulnerability scan already in progress
+                status: running
+                scan_type: vulnerability
+        '503':
+          description: The scan scheduler is not available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: scan scheduler is not available
+                status: unavailable
+                scan_type: vulnerability
         '500':
           $ref: '#/components/responses/InternalServerError'
       x-codeSamples:
@@ -1982,6 +2024,28 @@ components:
           type: string
           description: Execution state.
           example: running
+        scan_type:
+          type: string
+          enum: [discovery, vulnerability]
+          description: The scan type that was dispatched.
+          example: discovery
+
+    ScanTriggerConflict:
+      type: object
+      required:
+        - error
+        - status
+        - scan_type
+      properties:
+        error:
+          type: string
+          example: discovery scan already in progress
+        status:
+          type: string
+          enum: [running, unavailable]
+        scan_type:
+          type: string
+          enum: [discovery, vulnerability]
 
     ExportData:
       type: object
