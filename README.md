@@ -193,18 +193,26 @@ sudo ./proc_exec \
 
 Key settings can be configured via environment variables:
 
-| Variable | Description | Default |
+| Variable | Description | Default (binary) |
 |---|---|---|
 | `CERBERUS_PORT` | HTTP server port for REST API and agent ingestion | `8080` |
 | `CERBERUS_HOST` | Network interface to bind | `0.0.0.0` |
 | `CERBERUS_DB_PATH` | Path to SQLite database file | `cerberus.db` |
 | `CERBERUS_SUBNET` | Target CIDR to discover (e.g. `192.168.1.0/24`) | `172.28.0.0/24` |
-| `CERBERUS_DISCOVERY_INTERVAL` | Network discovery scan frequency | `30m` |
-| `CERBERUS_VULN_INTERVAL` | Vulnerability audit scan frequency | `10m` |
-| `CERBERUS_ENROLL_TOKEN` | Pre-shared token required for agent enrollment | *Empty* |
-| `CERBERUS_API_KEY` | Operator API key for administrative CRUD operations | *Empty* |
-| `CERBERUS_UNPRIVILEGED` | Force unprivileged TCP connect scan fallback | `true` |
+| `CERBERUS_DISCOVERY_INTERVAL` | Network discovery scan frequency | `5m` |
+| `CERBERUS_VULN_INTERVAL` | Vulnerability audit scan frequency | `5m` |
 | `CERBERUS_SCAN_TIMEOUT` | Maximum execution timeout per scan job | `15m` |
+| `CERBERUS_NMAP_PATH` | Nmap binary to execute | `nmap` |
+| `CERBERUS_VULN_SCRIPT` | NSE script used for CVE checks | `vulners` |
+| `CERBERUS_UNPRIVILEGED` | Force the unprivileged TCP connect scan fallback | `false` |
+| `CERBERUS_MOCK_DATA` | Seed the database with demo devices, services and CVEs on startup | `false` |
+| `CERBERUS_ENROLL_TOKEN` | Pre-shared token required for agent enrollment | *Empty* |
+| `CERBERUS_API_KEY` | Operator API key (`X-API-Key`) for administrative mutations from non-loopback clients | *Empty* |
+| `CERBERUS_INGEST_MAX_BODY` | Maximum agent telemetry request body (bytes) | `1048576` |
+| `CERBERUS_INGEST_SHARDS` | Ingestion dispatcher shards | `GOMAXPROCS` |
+| `CERBERUS_EVENT_RETENTION` | Agent event retention window | `168h` |
+
+Defaults come from `internal/config/config.go`. The `Dockerfile` overrides the scan intervals to `30m` / `10m`, and `docker-compose.yml` sets its own values for the sandbox.
 
 ---
 
@@ -232,10 +240,54 @@ All responses are formatted in JSON:
 - `GET /api/posture`: Current fleet security rating and individual host risk scores.
 - `GET /api/posture/history`: Historical fleet security rating snapshots.
 
+### Scans & System
+- `GET /api/scans`: Scan execution log, newest first (`?limit=50`). `scan_type` is `discovery`, `vulnerability` or `immediate` (automatic audit of a newly discovered host); `status` is `running`, `completed` or `failed`.
+- `POST /api/scans/discovery/trigger`: Start an on-demand discovery sweep of `CERBERUS_SUBNET`.
+- `POST /api/scans/vulnerability/trigger`: Start an on-demand vulnerability audit of all devices currently `up`.
+- `GET /api/status`: Uptime, inventory counts, scheduler next runs and `is_discovery_running` / `is_vuln_running` flags, nmap capabilities, fleet score.
+- `GET /api/export/json`: Full inventory snapshot as a downloadable JSON file.
+- `GET /health`: Liveness probe.
+
+Both trigger endpoints share one response contract:
+
+| Status | Body | Meaning |
+|---|---|---|
+| `202 Accepted` | `{"message": "...", "status": "running", "scan_type": "discovery"}` | Request handed to the scheduler worker. Follow progress through `GET /api/scans` and `GET /api/status`. |
+| `409 Conflict` | `{"error": "discovery scan already in progress", "status": "running", "scan_type": "discovery"}` | A scan of the same type is already running; nothing was queued. |
+| `503 Service Unavailable` | `{"error": "scan scheduler is not available", "status": "unavailable", "scan_type": "..."}` | The server was started without a scheduler. |
+
+Errors that happen inside the background worker are written to the log and recorded on the scan log row (`status: failed`, `error_message`).
+
+### CORS & Authentication
+- All `/api/*` routes except `/api/v1/agent/*` send `Access-Control-Allow-Origin: *` and allow `GET, POST, PUT, PATCH, DELETE, OPTIONS` with the headers `Content-Type, Authorization, X-Requested-With, X-Cerberus-Agent-Id, X-API-Key`.
+- Device mutations (`PATCH`, `merge`, `split`, `DELETE` on `/api/devices/{id}`) are accepted from loopback clients, or from other clients that send `X-API-Key: $CERBERUS_API_KEY`. The scan trigger endpoints currently require no authentication.
+
+The full machine-readable contract is in [`openapi.yaml`](openapi.yaml).
+
 ### Agent Ingestion
 - `POST /api/v1/agent/enroll`: Secure enrollment endpoint issuing agent bearer tokens.
 - `POST /api/v1/agent/telemetry`: High-throughput ingestion endpoint for eBPF event batches.
 - `GET /api/agents`: Enumerate registered endpoint probes and live heartbeat status.
+
+---
+
+## Web Dashboard (CerberusFront)
+
+The browser UI lives in [CerberusFront](https://github.com/Cerebelici/CerberusFront) (also referenced as the `front` git submodule). To run it against a local Sentinel:
+
+```bash
+# Terminal 1: Sentinel (this repo). This example scans only this machine.
+CERBERUS_HOST=127.0.0.1 CERBERUS_SUBNET=127.0.0.1/32 CERBERUS_DB_PATH=./cerberus.db go run ./cmd/sentinel
+
+# Terminal 2: dashboard
+cd ../CerberusFront
+cp .env.example .env        # DEV_PROXY_TARGET=http://localhost:8080 by default
+npm install && npm run dev  # http://localhost:5173
+```
+
+The Vite dev server proxies `/api/*` to the Sentinel, so requests reach it from loopback and no API key is needed. The dashboard's **Scans** page drives the trigger endpoints above and follows each scan through `GET /api/scans` until it completes or fails.
+
+On macOS, install the scanner with `brew install nmap`, then copy `scripts/vulners.nse` into `$(brew --prefix)/share/nmap/scripts/` and run `nmap --script-updatedb`.
 
 ---
 
@@ -265,6 +317,9 @@ make clean && make
 ```bash
 # Run Go unit & integration tests with race detection
 go test -race -count=1 ./...
+
+# Scan-trigger contract (202 / 409 / 503) and CORS preflight
+go test ./internal/api/ -run 'TriggerScan|CORSPreflight' -v
 
 # Run agent automated verification harness against mock Sentinel
 cd ../cerberus-agent
