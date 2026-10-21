@@ -57,3 +57,4 @@ func TestAppSettingsStorage(t *testing.T) {
 		t.Errorf("retrieved settings mismatch: %+v", got2)
 	}
 }
+

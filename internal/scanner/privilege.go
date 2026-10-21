@@ -163,3 +163,4 @@ func IsPrivilegedScanCapable(resolvedNmapPath string) bool {
 	}
 	return false
 }
+

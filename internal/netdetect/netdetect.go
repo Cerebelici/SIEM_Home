@@ -153,3 +153,4 @@ func DetectDefaultNetwork() (*model.NetworkInterfaceInfo, error) {
 	copy := ifaces[0]
 	return &copy, nil
 }
+

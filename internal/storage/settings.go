@@ -65,3 +65,4 @@ func (s *Storage) SaveAppSettings(ctx context.Context, settings model.AppSetting
 	}
 	return nil
 }
+

@@ -60,3 +60,4 @@ func TestIsIgnoredInterface(t *testing.T) {
 		}
 	}
 }
+
