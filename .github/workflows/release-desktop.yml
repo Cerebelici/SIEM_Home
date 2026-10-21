@@ -14,6 +14,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     strategy:
@@ -56,12 +59,12 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.23'
-          cache: true
+          cache: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install Linux Build Dependencies
         if: runner.os == 'Linux'
@@ -101,12 +104,8 @@ jobs:
         run: |
           cd desktop
           wails build -platform ${{ matrix.platform }} -clean
-          
-          # Create DMG
-          mkdir -p dmg_root
-          cp -r build/bin/cerberus.app dmg_root/
-          ln -s /Applications dmg_root/Applications
-          hdiutil create -volname "Cerberus Sentinel" -srcfolder dmg_root -ov -format UDZO ../${{ matrix.artifact_name }}
+          chmod +x packaging/darwin/build-dmg.sh
+          ./packaging/darwin/build-dmg.sh "../${{ matrix.artifact_name }}"
 
       - name: Build Linux Application (.deb)
         if: runner.os == 'Linux'
@@ -170,4 +169,3 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: release_artifacts/*
-
