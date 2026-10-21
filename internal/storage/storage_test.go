@@ -379,3 +379,245 @@ func TestTimelineStorage(t *testing.T) {
 		t.Errorf("expected 1 device in vulnTimeline, got %d", len(vulnTimeline.Devices))
 	}
 }
+
+func TestDeleteDevice_CascadeBehavior(t *testing.T) {
+	s, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// 1. Create a device
+	dev, _, err := s.UpsertDevice(ctx, &model.Device{
+		IP:     "192.168.1.50",
+		MAC:    "aa:bb:cc:dd:ee:01",
+		Status: "up",
+	})
+	if err != nil {
+		t.Fatalf("upsert device: %v", err)
+	}
+
+	// 2. Add services
+	_, err = s.UpsertService(ctx, &model.Service{
+		DeviceID: dev.ID, Port: 80, Protocol: "tcp", ServiceName: "http", State: "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert service 80: %v", err)
+	}
+	_, err = s.UpsertService(ctx, &model.Service{
+		DeviceID: dev.ID, Port: 443, Protocol: "tcp", ServiceName: "https", State: "open",
+	})
+	if err != nil {
+		t.Fatalf("upsert service 443: %v", err)
+	}
+
+	// 3. Add vulnerabilities
+	_, _, err = s.UpsertVulnerability(ctx, &model.Vulnerability{
+		DeviceID: dev.ID, ServicePort: 80, CVEID: "CVE-2023-1234", Severity: "HIGH", Title: "HTTP issue", DetectedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert vuln 80: %v", err)
+	}
+	_, _, err = s.UpsertVulnerability(ctx, &model.Vulnerability{
+		DeviceID: dev.ID, ServicePort: 443, CVEID: "CVE-2023-5678", Severity: "CRITICAL", Title: "SSL issue", DetectedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("upsert vuln 443: %v", err)
+	}
+
+	// 4. Create a scan and link device_scan_record
+	scanLog, err := s.CreateScanLog(ctx, &model.ScanLog{
+		ScanType:   "discovery",
+		Status:     "completed",
+		TargetSpec: "192.168.1.0/24",
+		StartedAt:  now,
+	})
+	if err != nil {
+		t.Fatalf("record scan: %v", err)
+	}
+
+	err = s.RecordDeviceScanObservation(ctx, &model.DeviceScanRecord{
+		DeviceID:     dev.ID,
+		ScanID:       scanLog.ID,
+		Status:       "up",
+		IsVulnerable: true,
+		VulnsCount:   2,
+		MaxSeverity:  "CRITICAL",
+		RecordedAt:   now,
+	})
+	if err != nil {
+		t.Fatalf("record device scan: %v", err)
+	}
+
+	// 5. Delete the device
+	if err := s.DeleteDevice(ctx, dev.ID); err != nil {
+		t.Fatalf("delete device: %v", err)
+	}
+
+	// Verify device is gone
+	dCheck, _ := s.GetDeviceByID(ctx, dev.ID)
+	if dCheck != nil {
+		t.Errorf("expected device to be nil, got %+v", dCheck)
+	}
+
+	// Verify services were cascade deleted
+	services, err := s.GetAllServices(ctx)
+	if err != nil {
+		t.Fatalf("get services: %v", err)
+	}
+	if len(services) != 0 {
+		t.Errorf("expected 0 services after cascade, got %d", len(services))
+	}
+
+	// Verify vulnerabilities were cascade deleted
+	vulns, err := s.GetAllVulnerabilities(ctx, "")
+	if err != nil {
+		t.Fatalf("get vulns: %v", err)
+	}
+	if len(vulns) != 0 {
+		t.Errorf("expected 0 vulnerabilities after cascade, got %d", len(vulns))
+	}
+
+	// CRITICAL: Verify scans table record remains completely UNTOUCHED
+	scans, err := s.GetRecentScans(ctx, 10)
+	if err != nil {
+		t.Fatalf("get scans: %v", err)
+	}
+	if len(scans) != 1 {
+		t.Fatalf("expected scans table to be untouched (1 scan), got %d", len(scans))
+	}
+	if scans[0].ID != scanLog.ID {
+		t.Errorf("expected scan id %d, got %d", scanLog.ID, scans[0].ID)
+	}
+}
+
+func TestClearAllDevices_And_ClearScanHistory(t *testing.T) {
+	s, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Seed 2 devices with services and vulns
+	d1, _, err := s.UpsertDevice(ctx, &model.Device{IP: "10.0.0.1", MAC: "00:11:22:33:44:01", Status: "up"})
+	if err != nil {
+		t.Fatalf("upsert d1: %v", err)
+	}
+	d2, _, err := s.UpsertDevice(ctx, &model.Device{IP: "10.0.0.2", MAC: "00:11:22:33:44:02", Status: "up"})
+	if err != nil {
+		t.Fatalf("upsert d2: %v", err)
+	}
+
+	_, _ = s.UpsertService(ctx, &model.Service{DeviceID: d1.ID, Port: 22, Protocol: "tcp", State: "open"})
+	_, _ = s.UpsertService(ctx, &model.Service{DeviceID: d2.ID, Port: 80, Protocol: "tcp", State: "open"})
+	_, _, _ = s.UpsertVulnerability(ctx, &model.Vulnerability{DeviceID: d1.ID, ServicePort: 22, CVEID: "CVE-2023-9999", Severity: "LOW", DetectedAt: now})
+
+	// Record 2 scans
+	s1, _ := s.CreateScanLog(ctx, &model.ScanLog{ScanType: "discovery", Status: "completed", StartedAt: now})
+	s2, _ := s.CreateScanLog(ctx, &model.ScanLog{ScanType: "vulnerability", Status: "completed", StartedAt: now})
+
+	_ = s.RecordDeviceScanObservation(ctx, &model.DeviceScanRecord{DeviceID: d1.ID, ScanID: s1.ID, Status: "up", RecordedAt: now})
+	_ = s.RecordDeviceScanObservation(ctx, &model.DeviceScanRecord{DeviceID: d2.ID, ScanID: s2.ID, Status: "up", RecordedAt: now})
+
+	// Test ClearAllDevices
+	count, err := s.ClearAllDevices(ctx)
+	if err != nil {
+		t.Fatalf("ClearAllDevices error: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected count 2, got %d", count)
+	}
+
+	devs, _ := s.GetDevices(ctx, "")
+	if len(devs) != 0 {
+		t.Errorf("expected 0 devices, got %d", len(devs))
+	}
+	services, _ := s.GetAllServices(ctx)
+	if len(services) != 0 {
+		t.Errorf("expected 0 services, got %d", len(services))
+	}
+	vulns, _ := s.GetAllVulnerabilities(ctx, "")
+	if len(vulns) != 0 {
+		t.Errorf("expected 0 vulns, got %d", len(vulns))
+	}
+
+	// Scans should STILL exist!
+	scans, _ := s.GetRecentScans(ctx, 10)
+	if len(scans) != 2 {
+		t.Fatalf("expected 2 scans preserved, got %d", len(scans))
+	}
+
+	// Now test ClearScanHistory
+	scanCount, err := s.ClearScanHistory(ctx)
+	if err != nil {
+		t.Fatalf("ClearScanHistory error: %v", err)
+	}
+	if scanCount != 2 {
+		t.Errorf("expected 2 scans cleared, got %d", scanCount)
+	}
+	scansAfter, _ := s.GetRecentScans(ctx, 10)
+	if len(scansAfter) != 0 {
+		t.Errorf("expected 0 scans, got %d", len(scansAfter))
+	}
+}
+
+func TestDeleteService_And_Vulnerability(t *testing.T) {
+	s, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	dev, _, _ := s.UpsertDevice(ctx, &model.Device{IP: "192.168.1.100", Status: "up"})
+	_, _ = s.UpsertService(ctx, &model.Service{
+		DeviceID: dev.ID, Port: 8080, Protocol: "tcp", ServiceName: "http-proxy", State: "open",
+	})
+	_, _ = s.UpsertService(ctx, &model.Service{
+		DeviceID: dev.ID, Port: 9090, Protocol: "tcp", ServiceName: "metrics", State: "open",
+	})
+	_, _, _ = s.UpsertVulnerability(ctx, &model.Vulnerability{
+		DeviceID: dev.ID, ServicePort: 8080, CVEID: "CVE-2024-0001", Severity: "CRITICAL", DetectedAt: now,
+	})
+	_, _, _ = s.UpsertVulnerability(ctx, &model.Vulnerability{
+		DeviceID: dev.ID, ServicePort: 9090, CVEID: "CVE-2024-0002", Severity: "LOW", DetectedAt: now,
+	})
+
+	services, _ := s.GetAllServices(ctx)
+	if len(services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(services))
+	}
+
+	// Find the 8080 service ID
+	var s8080ID int64
+	for _, srv := range services {
+		if srv.Port == 8080 {
+			s8080ID = srv.ID
+			break
+		}
+	}
+
+	// Delete service 8080 - should also remove CVE-2024-0001
+	if err := s.DeleteService(ctx, s8080ID); err != nil {
+		t.Fatalf("DeleteService error: %v", err)
+	}
+
+	servicesLeft, _ := s.GetAllServices(ctx)
+	if len(servicesLeft) != 1 || servicesLeft[0].Port != 9090 {
+		t.Errorf("expected only port 9090 left, got %+v", servicesLeft)
+	}
+
+	vulnsLeft, _ := s.GetAllVulnerabilities(ctx, "")
+	if len(vulnsLeft) != 1 || vulnsLeft[0].CVEID != "CVE-2024-0002" {
+		t.Errorf("expected only CVE-2024-0002 left, got %+v", vulnsLeft)
+	}
+
+	// Now delete vulnerability directly
+	if err := s.DeleteVulnerability(ctx, vulnsLeft[0].ID); err != nil {
+		t.Fatalf("DeleteVulnerability error: %v", err)
+	}
+
+	vulnsFinal, _ := s.GetAllVulnerabilities(ctx, "")
+	if len(vulnsFinal) != 0 {
+		t.Errorf("expected 0 vulnerabilities, got %d", len(vulnsFinal))
+	}
+}

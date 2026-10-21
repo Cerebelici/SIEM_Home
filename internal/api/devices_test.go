@@ -261,3 +261,65 @@ func TestAPI_DeviceIdentityResolutionHook(t *testing.T) {
 	}
 }
 
+func TestAPI_ClearAllDevices_And_DeleteEndpoints(t *testing.T) {
+	handler, store, cleanup := setupDeviceAPITest(t, "")
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	dev, _, err := store.UpsertDevice(ctx, &model.Device{IP: "10.0.0.99", Status: "up"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := store.UpsertService(ctx, &model.Service{DeviceID: dev.ID, Port: 80, Protocol: "tcp", State: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vuln, _, err := store.UpsertVulnerability(ctx, &model.Vulnerability{DeviceID: dev.ID, ServicePort: 80, CVEID: "CVE-2024-1111", Severity: "HIGH", DetectedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err := store.CreateScanLog(ctx, &model.ScanLog{ScanType: "discovery", Status: "completed", StartedAt: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. DELETE /api/vulnerabilities/{id}
+	reqDelVuln := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/vulnerabilities/%d", vuln.ID), nil)
+	reqDelVuln.RemoteAddr = "127.0.0.1:12345"
+	recDelVuln := httptest.NewRecorder()
+	handler.ServeHTTP(recDelVuln, reqDelVuln)
+	if recDelVuln.Code != http.StatusOK {
+		t.Fatalf("delete vuln failed: %d", recDelVuln.Code)
+	}
+
+	// 2. DELETE /api/services/{id}
+	reqDelSvc := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/services/%d", svc.ID), nil)
+	reqDelSvc.RemoteAddr = "127.0.0.1:12345"
+	recDelSvc := httptest.NewRecorder()
+	handler.ServeHTTP(recDelSvc, reqDelSvc)
+	if recDelSvc.Code != http.StatusOK {
+		t.Fatalf("delete svc failed: %d", recDelSvc.Code)
+	}
+
+	// 3. DELETE /api/scans
+	reqDelScans := httptest.NewRequest(http.MethodDelete, "/api/scans", nil)
+	reqDelScans.RemoteAddr = "127.0.0.1:12345"
+	recDelScans := httptest.NewRecorder()
+	handler.ServeHTTP(recDelScans, reqDelScans)
+	if recDelScans.Code != http.StatusOK {
+		t.Fatalf("clear scans failed: %d", recDelScans.Code)
+	}
+
+	// 4. DELETE /api/devices
+	reqClearDevs := httptest.NewRequest(http.MethodDelete, "/api/devices", nil)
+	reqClearDevs.RemoteAddr = "127.0.0.1:12345"
+	recClearDevs := httptest.NewRecorder()
+	handler.ServeHTTP(recClearDevs, reqClearDevs)
+	if recClearDevs.Code != http.StatusOK {
+		t.Fatalf("clear devices failed: %d", recClearDevs.Code)
+	}
+	_ = scan
+}
+

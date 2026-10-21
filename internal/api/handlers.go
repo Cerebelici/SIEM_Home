@@ -223,6 +223,90 @@ func (s *Server) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+// handleClearAllDevices purges all devices and dependent child records.
+func (s *Server) handleClearAllDevices(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	count, err := s.storage.ClearAllDevices(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared", "deleted": count})
+}
+
+// handleClearScanHistory purges all historical scan execution logs.
+func (s *Server) handleClearScanHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	count, err := s.storage.ClearScanHistory(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"status": "cleared", "deleted": count})
+}
+
+// handleDeleteService deletes a single service entity.
+func (s *Server) handleDeleteService(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	idStr := r.PathValue("id")
+	serviceID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid service id"})
+		return
+	}
+
+	if err := s.storage.DeleteService(r.Context(), serviceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("service %d not found", serviceID)})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// handleDeleteVulnerability deletes a single vulnerability entity.
+func (s *Server) handleDeleteVulnerability(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+
+	idStr := r.PathValue("id")
+	vulnID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid vulnerability id"})
+		return
+	}
+
+	if err := s.storage.DeleteVulnerability(r.Context(), vulnID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("vulnerability %d not found", vulnID)})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // handleGetDeviceIdentity returns identity resolution decision logs for a device.
 func (s *Server) handleGetDeviceIdentity(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")

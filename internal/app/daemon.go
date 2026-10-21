@@ -370,6 +370,58 @@ func (d *Daemon) DeleteDevice(ctx context.Context, id int64) error {
 	return store.DeleteDevice(ctx, id)
 }
 
+// ClearAllDevices deletes all devices and their dependent items.
+func (d *Daemon) ClearAllDevices(ctx context.Context) (int64, error) {
+	d.mu.Lock()
+	store := d.store
+	d.mu.Unlock()
+
+	if store == nil {
+		return 0, fmt.Errorf("storage not initialized")
+	}
+
+	return store.ClearAllDevices(ctx)
+}
+
+// ClearScanHistory deletes all scan execution records.
+func (d *Daemon) ClearScanHistory(ctx context.Context) (int64, error) {
+	d.mu.Lock()
+	store := d.store
+	d.mu.Unlock()
+
+	if store == nil {
+		return 0, fmt.Errorf("storage not initialized")
+	}
+
+	return store.ClearScanHistory(ctx)
+}
+
+// DeleteService deletes a single service and its vulnerabilities.
+func (d *Daemon) DeleteService(ctx context.Context, id int64) error {
+	d.mu.Lock()
+	store := d.store
+	d.mu.Unlock()
+
+	if store == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+
+	return store.DeleteService(ctx, id)
+}
+
+// DeleteVulnerability deletes a single vulnerability finding.
+func (d *Daemon) DeleteVulnerability(ctx context.Context, id int64) error {
+	d.mu.Lock()
+	store := d.store
+	d.mu.Unlock()
+
+	if store == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+
+	return store.DeleteVulnerability(ctx, id)
+}
+
 // GetServices returns all network services detected across devices.
 func (d *Daemon) GetServices(ctx context.Context) ([]model.Service, error) {
 	d.mu.Lock()

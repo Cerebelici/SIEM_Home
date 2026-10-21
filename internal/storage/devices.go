@@ -850,6 +850,101 @@ func (s *Storage) DeleteDevice(ctx context.Context, id int64) error {
 	return nil
 }
 
+// ClearAllDevices deletes all devices, triggering cascading deletion of services,
+// vulnerabilities, device_addresses, device_scan_records, and incidents.
+// It also clears identity decisions and posture snapshots, but preserves scan history logs and app_settings.
+func (s *Storage) ClearAllDevices(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.WithTx(ctx, func(tx *Tx) error {
+		row := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices;`)
+		if err := row.Scan(&count); err != nil {
+			return fmt.Errorf("counting devices before purge: %w", err)
+		}
+
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM devices;`); err != nil {
+			return fmt.Errorf("purging devices: %w", err)
+		}
+
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM identity_decisions;`); err != nil {
+			return fmt.Errorf("purging identity_decisions: %w", err)
+		}
+
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM posture_snapshots;`); err != nil {
+			return fmt.Errorf("purging posture_snapshots: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// ClearScanHistory deletes all scan execution records, cascading deletion of device_scan_records.
+// Discovered devices, services, and vulnerabilities remain untouched.
+func (s *Storage) ClearScanHistory(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.WithTx(ctx, func(tx *Tx) error {
+		row := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans;`)
+		if err := row.Scan(&count); err != nil {
+			return fmt.Errorf("counting scans before purge: %w", err)
+		}
+
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM scans;`); err != nil {
+			return fmt.Errorf("purging scans: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// DeleteService deletes a single service and any associated vulnerability on that port.
+func (s *Storage) DeleteService(ctx context.Context, id int64) error {
+	return s.WithTx(ctx, func(tx *Tx) error {
+		var deviceID int64
+		var port int
+		row := tx.tx.QueryRowContext(ctx, `SELECT device_id, port FROM services WHERE id = ?;`, id)
+		if err := row.Scan(&deviceID, &port); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return sql.ErrNoRows
+			}
+			return fmt.Errorf("finding service %d: %w", id, err)
+		}
+
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM vulnerabilities WHERE device_id = ? AND service_port = ?;`, deviceID, port); err != nil {
+			return fmt.Errorf("deleting vulnerabilities for service %d: %w", id, err)
+		}
+
+		res, err := tx.tx.ExecContext(ctx, `DELETE FROM services WHERE id = ?;`, id)
+		if err != nil {
+			return fmt.Errorf("deleting service %d: %w", id, err)
+		}
+		rows, _ := res.RowsAffected()
+		if rows == 0 {
+			return sql.ErrNoRows
+		}
+		return nil
+	})
+}
+
+// DeleteVulnerability deletes a single vulnerability record by ID.
+func (s *Storage) DeleteVulnerability(ctx context.Context, id int64) error {
+	res, err := s.w.ExecContext(ctx, `DELETE FROM vulnerabilities WHERE id = ?;`, id)
+	if err != nil {
+		return fmt.Errorf("deleting vulnerability %d: %w", id, err)
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // UpdateDeviceFields updates label, criticality, or notes on a device.
 func (s *Storage) UpdateDeviceFields(ctx context.Context, id int64, label *string, criticality *string, notes *string) (*model.Device, error) {
 	if criticality != nil {

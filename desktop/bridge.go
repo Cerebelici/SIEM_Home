@@ -97,6 +97,56 @@ func (b *Bridge) DeleteDevice(id int64) (map[string]string, error) {
 	return map[string]string{"status": "deleted"}, nil
 }
 
+// ClearAllDevices deletes all devices and their dependent items.
+func (b *Bridge) ClearAllDevices() (map[string]any, error) {
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	count, err := b.d.ClearAllDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "cleared", "deleted": count}, nil
+}
+
+// ClearScanHistory deletes all scan execution records.
+func (b *Bridge) ClearScanHistory() (map[string]any, error) {
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	count, err := b.d.ClearScanHistory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "cleared", "deleted": count}, nil
+}
+
+// DeleteService deletes a single service and associated findings.
+func (b *Bridge) DeleteService(id int64) (map[string]string, error) {
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := b.d.DeleteService(ctx, id); err != nil {
+		return nil, err
+	}
+	return map[string]string{"status": "deleted"}, nil
+}
+
+// DeleteVulnerability deletes a single vulnerability finding.
+func (b *Bridge) DeleteVulnerability(id int64) (map[string]string, error) {
+	ctx := b.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := b.d.DeleteVulnerability(ctx, id); err != nil {
+		return nil, err
+	}
+	return map[string]string{"status": "deleted"}, nil
+}
+
 // GetServices returns all services detected across the network.
 func (b *Bridge) GetServices() (map[string]any, error) {
 	ctx := b.ctx

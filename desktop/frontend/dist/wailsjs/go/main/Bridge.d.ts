@@ -3,7 +3,15 @@
 import {model} from '../models';
 import {context} from '../models';
 
+export function ClearAllDevices():Promise<Record<string, any>>;
+
+export function ClearScanHistory():Promise<Record<string, any>>;
+
 export function DeleteDevice(arg1:number):Promise<Record<string, string>>;
+
+export function DeleteService(arg1:number):Promise<Record<string, string>>;
+
+export function DeleteVulnerability(arg1:number):Promise<Record<string, string>>;
 
 export function GetDeviceByID(arg1:number):Promise<model.Device>;
 
