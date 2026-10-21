@@ -196,8 +196,8 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 			args = append(args, "-p", scanPorts)
 		}
 	} else {
-		// Default to top 2000 ports so services like Redis (6379, rank 1923) and custom apps (3000, 8080) are audited
-		args = append(args, "--top-ports", "2000")
+		// Default to ports 1-10000 so services like Redis (6379, rank 5219) and custom apps (3000, 8080) are audited
+		args = append(args, "-p", "1-10000")
 	}
 
 	args = append(args, "--exclude", "172.28.0.5,172.28.0.1")
