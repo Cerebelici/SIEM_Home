@@ -71,8 +71,10 @@ jobs:
 
       - name: Install Windows NSIS
         if: runner.os == 'Windows'
+        shell: bash
         run: |
           choco install nsis -y
+          echo "C:\Program Files (x86)\NSIS" >> $GITHUB_PATH
 
       - name: Install Wails CLI
         shell: bash
@@ -111,7 +113,7 @@ jobs:
         shell: bash
         run: |
           cd desktop
-          wails build -platform ${{ matrix.platform }} -clean
+          wails build -platform ${{ matrix.platform }} -tags webkit2_41 -clean
           chmod +x packaging/linux/build-deb.sh
           ./packaging/linux/build-deb.sh "${PLAIN_VERSION}" "../${{ matrix.artifact_name }}"
 
@@ -121,7 +123,15 @@ jobs:
         run: |
           cd desktop
           wails build -platform ${{ matrix.platform }} -nsis -clean
-          cp build/bin/cerberus-amd64-installer.exe ../${{ matrix.artifact_name }}
+          ls -la build/bin/
+          if ls build/bin/*installer.exe 1> /dev/null 2>&1; then
+            cp build/bin/*installer.exe ../${{ matrix.artifact_name }}
+          elif ls build/bin/*.exe 1> /dev/null 2>&1; then
+            cp build/bin/*.exe ../${{ matrix.artifact_name }}
+          else
+            echo "Error: no windows executable found in build/bin/"
+            exit 1
+          fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
