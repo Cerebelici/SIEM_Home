@@ -36,6 +36,10 @@ go.work.sum
 # Local build artifacts and databases
 bin/
 desktop/build/bin/
+desktop/dmg_root/
+desktop/pkg_debian/
+*.dmg
+*.deb
 data/
 *.db
 *.db-shm
