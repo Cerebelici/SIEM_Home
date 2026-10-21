@@ -34,6 +34,12 @@ func Preflight(ctx context.Context, cfg *config.Config, r CommandRunner, look fu
 
 	resolvedPath, err := look(nmapPath)
 	if err != nil {
+		fallback := ResolveNmapBinary(nmapPath)
+		if fallback != "" && fallback != nmapPath {
+			resolvedPath, err = look(fallback)
+		}
+	}
+	if err != nil {
 		return nil, ErrNmapNotFound
 	}
 

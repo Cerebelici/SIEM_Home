@@ -35,6 +35,7 @@ go.work.sum
 
 # Local build artifacts and databases
 bin/
+desktop/build/bin/
 data/
 *.db
 *.db-shm

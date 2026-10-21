@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/gr0gu/cerberus/internal/config"
 	"github.com/gr0gu/cerberus/internal/model"
@@ -38,9 +39,12 @@ func (r *DefaultCommandRunner) Run(ctx context.Context, name string, args ...str
 
 // Scanner orchestrates Nmap discovery and vulnerability audits.
 type Scanner struct {
-	cfg    *config.Config
-	runner CommandRunner
-	caps   *model.Capabilities
+	cfg        *config.Config
+	runner     CommandRunner
+	caps       *model.Capabilities
+	mu         sync.RWMutex
+	excludeIPs []string
+	scanPorts  string
 }
 
 // New creates a new Scanner instance with the default command runner.
@@ -49,11 +53,15 @@ func New(cfg *config.Config, caps ...*model.Capabilities) *Scanner {
 	if len(caps) > 0 {
 		c = caps[0]
 	}
-	return &Scanner{
+	s := &Scanner{
 		cfg:    cfg,
 		runner: &DefaultCommandRunner{},
 		caps:   c,
 	}
+	if cfg != nil && cfg.ScanPorts != "" {
+		s.scanPorts = cfg.ScanPorts
+	}
+	return s
 }
 
 // NewWithRunner creates a Scanner with a custom CommandRunner (for unit tests).
@@ -62,21 +70,59 @@ func NewWithRunner(cfg *config.Config, runner CommandRunner, caps ...*model.Capa
 	if len(caps) > 0 {
 		c = caps[0]
 	}
-	return &Scanner{
+	s := &Scanner{
 		cfg:    cfg,
 		runner: runner,
 		caps:   c,
 	}
+	if cfg != nil && cfg.ScanPorts != "" {
+		s.scanPorts = cfg.ScanPorts
+	}
+	return s
 }
 
 // SetCapabilities updates the capability profile for the scanner.
 func (s *Scanner) SetCapabilities(caps *model.Capabilities) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.caps = caps
 }
 
 // Capabilities returns the active capability profile.
 func (s *Scanner) Capabilities() *model.Capabilities {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.caps
+}
+
+// SetExcludeIPs updates the list of host IP addresses excluded from scanning.
+func (s *Scanner) SetExcludeIPs(ips ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var clean []string
+	for _, ip := range ips {
+		ip = strings.TrimSpace(ip)
+		if ip != "" {
+			clean = append(clean, ip)
+		}
+	}
+	s.excludeIPs = clean
+}
+
+// SetScanPorts updates the port range scanned during vulnerability audits.
+func (s *Scanner) SetScanPorts(ports string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.scanPorts = strings.TrimSpace(ports)
+}
+
+func (s *Scanner) getExcludeArgs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.excludeIPs) > 0 {
+		return []string{"--exclude", strings.Join(s.excludeIPs, ",")}
+	}
+	return []string{"--exclude", "172.28.0.1,172.28.0.5"}
 }
 
 func (s *Scanner) isUnprivileged() bool {
@@ -117,7 +163,7 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 		args = append(args, "-PS21,22,80,135,139,443,445,3000,3389,6379,8080", "-PA80,443")
 	}
 
-	args = append(args, "--exclude", "172.28.0.1,172.28.0.5")
+	args = append(args, s.getExcludeArgs()...)
 	args = append(args, target)
 
 	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)
@@ -179,9 +225,13 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 
 	// Port specification: use configurable scan ports or default to top 2000 ports
 	scanPorts := ""
-	if s.cfg != nil {
+	s.mu.RLock()
+	if s.scanPorts != "" {
+		scanPorts = s.scanPorts
+	} else if s.cfg != nil {
 		scanPorts = strings.TrimSpace(s.cfg.ScanPorts)
 	}
+	s.mu.RUnlock()
 
 	if scanPorts != "" {
 		if strings.HasPrefix(scanPorts, "--top-ports ") {
@@ -200,7 +250,7 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 		args = append(args, "-p", "1-10000")
 	}
 
-	args = append(args, "--exclude", "172.28.0.5,172.28.0.1")
+	args = append(args, s.getExcludeArgs()...)
 	args = append(args, targets...)
 
 	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)

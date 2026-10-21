@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "cerberus",
+  "outputfilename": "cerberus-desktop",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dir": "frontend/dist",
+  "author": {
+    "name": "Cerberus Security Team",
+    "email": "security@cerberus.local"
+  },
+  "info": {
+    "companyName": "Cerberus Security",
+    "productName": "Cerberus Sentinel",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright 2026 Cerberus Team",
+    "comments": "Network Sentinel & Vulnerability Audit Desktop"
+  }
+}

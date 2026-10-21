@@ -267,8 +267,8 @@ func TestMigrations_FromV0(t *testing.T) {
 	if err := s.RawReader().QueryRow("PRAGMA user_version;").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 {
-		t.Errorf("expected user_version=7, got %d", version)
+	if version != 8 {
+		t.Errorf("expected user_version=8, got %d", version)
 	}
 
 	dev, err := s.GetDeviceByIP(context.Background(), "10.0.0.1")

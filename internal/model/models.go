@@ -269,3 +269,34 @@ type TimelineResponse struct {
 	ScanTicks  []ScanTick         `json:"scan_ticks"`
 	Devices    []TimelineDevice   `json:"devices"`
 }
+
+// NetworkInterfaceInfo describes a local network interface and its IPv4 subnet.
+type NetworkInterfaceInfo struct {
+	Name      string `json:"name"`       // e.g. "en0", "eth0", "Wi-Fi"
+	IPv4      string `json:"ipv4"`       // e.g. "192.168.1.42"
+	CIDR      string `json:"cidr"`       // e.g. "192.168.1.0/24"
+	MAC       string `json:"mac"`        // e.g. "aa:bb:cc:dd:ee:ff"
+	IsDefault bool   `json:"is_default"` // True if primary outbound route
+}
+
+// AppSettings holds user-configurable and auto-detected runtime settings.
+type AppSettings struct {
+	NetworkMode          string `json:"network_mode"`           // "auto" | "interface" | "custom"
+	SelectedInterface    string `json:"selected_interface"`     // e.g. "en0"
+	CustomNetworkCIDR    string `json:"custom_network_cidr"`    // e.g. "192.168.1.0/24"
+	EffectiveCIDR        string `json:"effective_cidr"`         // Target CIDR currently being scanned
+	EffectiveExcludeIP   string `json:"effective_exclude_ip"`   // Host IP excluded from scan
+	ScanPorts            string `json:"scan_ports"`             // "" (Top 1000), "1-65535", or custom "22,80,443"
+	DiscoveryIntervalSec int    `json:"discovery_interval_sec"` // Interval between discovery scans in seconds
+	VulnIntervalSec      int    `json:"vuln_interval_sec"`      // Interval between vuln scans in seconds
+	UnprivilegedMode     bool   `json:"unprivileged_mode"`      // true = TCP Connect (--unprivileged), false = SYN
+	NmapPath             string `json:"nmap_path"`              // Detected or user-overridden Nmap path
+}
+
+// SettingsResponse returns the persisted settings, available interfaces, and current scanner capabilities.
+type SettingsResponse struct {
+	Settings     AppSettings            `json:"settings"`
+	Interfaces   []NetworkInterfaceInfo `json:"interfaces"`
+	Capabilities *Capabilities          `json:"capabilities"`
+}
+

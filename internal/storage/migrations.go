@@ -404,6 +404,24 @@ func (s *Storage) getMigrations() []migration {
 				return nil
 			},
 		},
+		{
+			version: 8,
+			up: func(tx *sql.Tx) error {
+				queries := []string{
+					`CREATE TABLE IF NOT EXISTS app_settings (
+						key TEXT PRIMARY KEY,
+						value TEXT NOT NULL,
+						updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+					);`,
+				}
+				for _, q := range queries {
+					if _, err := tx.Exec(q); err != nil {
+						return fmt.Errorf("executing migration 8 query (%s): %w", q, err)
+					}
+				}
+				return nil
+			},
+		},
 	}
 }
 

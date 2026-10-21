@@ -1,0 +1,201 @@
+name: Release Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release version tag (e.g. v1.0.0)'
+        required: false
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin/universal
+            artifact_name: Cerberus-macOS-universal.dmg
+          - os: ubuntu-24.04
+            platform: linux/amd64
+            artifact_name: cerberus-sentinel-linux-amd64.deb
+          - os: windows-latest
+            platform: windows/amd64
+            artifact_name: Cerberus-Windows-amd64-installer.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Cerberus Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set Release Version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          # Strip leading 'v'
+          PLAIN_VERSION="${VERSION#v}"
+          echo "RELEASE_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "PLAIN_VERSION=${PLAIN_VERSION}" >> $GITHUB_ENV
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Linux Build Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev build-essential nsis
+
+      - name: Install Windows NSIS
+        if: runner.os == 'Windows'
+        run: |
+          choco install nsis -y
+
+      - name: Install Wails CLI
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build Frontend (CerberusFront)
+        shell: bash
+        run: |
+          if [ -d "front" ] && [ -f "front/package.json" ]; then
+            cd front
+            npm ci || npm install
+            npm run build
+            cd ..
+            mkdir -p desktop/frontend/dist
+            cp -r front/dist/* desktop/frontend/dist/
+          elif [ -f "desktop/frontend/dist/index.html" ]; then
+            echo "Pre-built frontend assets present in desktop/frontend/dist"
+          fi
+
+      - name: Build macOS Application (.app & .dmg)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd desktop
+          wails build -platform ${{ matrix.platform }} -clean
+          
+          # Create DMG
+          mkdir -p dmg_root
+          cp -r build/bin/cerberus.app dmg_root/
+          ln -s /Applications dmg_root/Applications
+          hdiutil create -volname "Cerberus Sentinel" -srcfolder dmg_root -ov -format UDZO ../${{ matrix.artifact_name }}
+
+      - name: Build Linux Application (.deb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cd desktop
+          wails build -platform ${{ matrix.platform }} -clean
+          
+          # Prepare Debian Package Directory
+          PKG_DIR="pkg_debian"
+          mkdir -p "${PKG_DIR}/DEBIAN"
+          mkdir -p "${PKG_DIR}/usr/bin"
+          mkdir -p "${PKG_DIR}/usr/share/applications"
+          mkdir -p "${PKG_DIR}/usr/share/icons/hicolor/512x512/apps"
+          
+          cp build/bin/cerberus-desktop "${PKG_DIR}/usr/bin/"
+          chmod +x "${PKG_DIR}/usr/bin/cerberus-desktop"
+          
+          if [ -f "packaging/linux/cerberus.desktop" ]; then
+            cp packaging/linux/cerberus.desktop "${PKG_DIR}/usr/share/applications/"
+          fi
+          if [ -f "build/appicon.png" ]; then
+            cp build/appicon.png "${PKG_DIR}/usr/share/icons/hicolor/512x512/apps/cerberus.png"
+          fi
+          
+          cat <<EOF > "${PKG_DIR}/DEBIAN/control"
+Package: cerberus-sentinel
+Version: ${PLAIN_VERSION}
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: nmap, policykit-1, libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
+Maintainer: Cerberus Team <security@cerberus.local>
+Description: Cerberus Automated Network Sentinel and Vulnerability Assessment Desktop
+EOF
+
+          cat <<'EOF' > "${PKG_DIR}/DEBIAN/postinst"
+#!/bin/sh
+set -e
+if command -v setcap >/dev/null 2>&1 && command -v nmap >/dev/null 2>&1; then
+    NMAP_BIN="$(which nmap)"
+    setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip "$NMAP_BIN" 2>/dev/null || true
+fi
+exit 0
+EOF
+          chmod 755 "${PKG_DIR}/DEBIAN/postinst"
+          
+          dpkg-deb --build "${PKG_DIR}" "../${{ matrix.artifact_name }}"
+
+      - name: Build Windows Application (NSIS Installer)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd desktop
+          wails build -platform ${{ matrix.platform }} -nsis -clean
+          cp build/bin/cerberus-amd64-installer.exe ../${{ matrix.artifact_name }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_artifacts
+          merge-multiple: true
+
+      - name: Determine Release Tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> $GITHUB_ENV
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Cerberus Sentinel ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: release_artifacts/*

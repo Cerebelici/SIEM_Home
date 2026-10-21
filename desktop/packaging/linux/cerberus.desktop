@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Cerberus Sentinel
+Comment=Automated Network Sentinel & Vulnerability Assessment
+Exec=/usr/bin/cerberus-desktop
+Icon=cerberus
+Terminal=false
+Type=Application
+Categories=Security;Network;System;
+StartupWMClass=cerberus-desktop
