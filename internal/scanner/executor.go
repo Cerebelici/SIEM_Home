@@ -125,7 +125,23 @@ func (s *Scanner) getExcludeArgs() []string {
 	return []string{"--exclude", "172.28.0.1,172.28.0.5"}
 }
 
+func (s *Scanner) nmapBinary() string {
+	s.mu.RLock()
+	if s.caps != nil && s.caps.NmapPath != "" && s.caps.NmapPath != "nmap" {
+		p := s.caps.NmapPath
+		s.mu.RUnlock()
+		return p
+	}
+	s.mu.RUnlock()
+	if s.cfg != nil && s.cfg.NmapPath != "" {
+		return ResolveNmapBinary(s.cfg.NmapPath)
+	}
+	return ResolveNmapBinary("nmap")
+}
+
 func (s *Scanner) isUnprivileged() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.caps != nil {
 		return s.caps.EffectiveMode == "unprivileged"
 	}
@@ -133,6 +149,12 @@ func (s *Scanner) isUnprivileged() bool {
 		return s.cfg.ForceUnprivileged
 	}
 	return true
+}
+
+func (s *Scanner) usePrivilegedFlag() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.caps != nil && s.caps.EffectiveMode == "privileged"
 }
 
 func isCompleteNmapOutput(output []byte) bool {
@@ -161,12 +183,14 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 
 	if s.isUnprivileged() {
 		args = append(args, "-PS21,22,80,135,139,443,445,3000,3389,6379,8080", "-PA80,443")
+	} else if s.usePrivilegedFlag() {
+		args = append(args, "--privileged")
 	}
 
 	args = append(args, s.getExcludeArgs()...)
 	args = append(args, target)
 
-	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)
+	output, err := s.runner.Run(ctx, s.nmapBinary(), args...)
 	if err != nil && !isCompleteNmapOutput(output) {
 		return nil, fmt.Errorf("discovery scan failed: %w", err)
 	}
@@ -221,6 +245,8 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 
 	if s.isUnprivileged() {
 		args = append(args, "-sT", "-Pn")
+	} else if s.usePrivilegedFlag() {
+		args = append(args, "--privileged")
 	}
 
 	// Port specification: use configurable scan ports or default to top 2000 ports
@@ -253,7 +279,7 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 	args = append(args, s.getExcludeArgs()...)
 	args = append(args, targets...)
 
-	output, err := s.runner.Run(ctx, s.cfg.NmapPath, args...)
+	output, err := s.runner.Run(ctx, s.nmapBinary(), args...)
 	if err != nil && !isCompleteNmapOutput(output) {
 		return nil, fmt.Errorf("vulnerability scan failed: %w", err)
 	}

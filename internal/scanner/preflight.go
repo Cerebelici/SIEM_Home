@@ -106,6 +106,9 @@ func Preflight(ctx context.Context, cfg *config.Config, r CommandRunner, look fu
 				}
 			}
 		}
+		if !rawSocket && IsSetuidRoot(resolvedPath) {
+			rawSocket = true
+		}
 	}
 	caps.RawSocket = rawSocket
 

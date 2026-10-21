@@ -84,9 +84,13 @@ func SetupPrivilegesOrInstall(ctx context.Context, nmapPath string) error {
 
 	switch runtime.GOOS {
 	case "linux":
-		// On Linux, use pkexec to grant cap_net_raw without running the entire UI as root
+		// On Linux, use pkexec to grant cap_net_raw on the real binary (setcap fails on symlinks)
 		if _, err := os.Stat(resolved); err == nil {
-			cmd := exec.CommandContext(ctx, "pkexec", "setcap", "cap_net_raw,cap_net_admin,cap_net_bind_service+eip", resolved)
+			realPath := resolved
+			if eval, err := filepath.EvalSymlinks(resolved); err == nil && eval != "" {
+				realPath = eval
+			}
+			cmd := exec.CommandContext(ctx, "pkexec", "setcap", "cap_net_raw,cap_net_admin,cap_net_bind_service+eip", realPath)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("pkexec setcap failed: %w (output: %s)", err, string(out))
@@ -94,7 +98,7 @@ func SetupPrivilegesOrInstall(ctx context.Context, nmapPath string) error {
 			return nil
 		}
 		// If nmap does not exist, attempt apt-get install via pkexec
-		cmd := exec.CommandContext(ctx, "pkexec", "sh", "-c", "apt-get update && apt-get install -y nmap")
+		cmd := exec.CommandContext(ctx, "pkexec", "sh", "-c", "apt-get update && apt-get install -y nmap && setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(realpath $(which nmap))")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("pkexec apt-get install nmap failed: %w (output: %s)", err, string(out))
@@ -105,8 +109,12 @@ func SetupPrivilegesOrInstall(ctx context.Context, nmapPath string) error {
 		// On macOS, prompt via osascript Administrator dialog
 		var script string
 		if _, err := os.Stat(resolved); err == nil {
-			// Grant setuid or configure permissions on discovered nmap
-			script = fmt.Sprintf("do shell script \"chmod u+s %s\" with administrator privileges", resolved)
+			realPath := resolved
+			if eval, err := filepath.EvalSymlinks(resolved); err == nil && eval != "" {
+				realPath = eval
+			}
+			// Set root:wheel ownership + setuid root (4755) on the resolved nmap binary and grant /dev/bpf* access
+			script = fmt.Sprintf("do shell script \"chown root:wheel '%s' && chmod 4755 '%s' && (chmod o+rw /dev/bpf* 2>/dev/null || true)\" with administrator privileges", realPath, realPath)
 		} else {
 			// Check if bundled nmap-installer pkg is present in Resources
 			execPath, _ := os.Executable()
@@ -147,15 +155,51 @@ func SetupPrivilegesOrInstall(ctx context.Context, nmapPath string) error {
 	}
 }
 
-// IsPrivilegedScanCapable checks if the current process has raw-socket network permissions.
+// IsSetuidRoot checks whether the target Nmap binary (following symlinks) has the setuid bit set and is owned by root (UID 0).
+func IsSetuidRoot(resolvedNmapPath string) bool {
+	if resolvedNmapPath == "" {
+		return false
+	}
+	realPath := resolvedNmapPath
+	if eval, err := filepath.EvalSymlinks(resolvedNmapPath); err == nil && eval != "" {
+		realPath = eval
+	}
+	fi, err := os.Stat(realPath)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	if fi.Mode()&os.ModeSetuid == 0 {
+		return false
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.Command("stat", "-f", "%u", realPath).Output()
+		return err == nil && strings.TrimSpace(string(out)) == "0"
+	case "linux":
+		out, err := exec.Command("stat", "-c", "%u", realPath).Output()
+		return err == nil && strings.TrimSpace(string(out)) == "0"
+	default:
+		return false
+	}
+}
+
+// IsPrivilegedScanCapable checks if the current process or Nmap binary has raw-socket network permissions.
 func IsPrivilegedScanCapable(resolvedNmapPath string) bool {
 	if os.Geteuid() == 0 {
 		return true
 	}
+	if IsSetuidRoot(resolvedNmapPath) {
+		return true
+	}
 	if runtime.GOOS == "linux" {
+		realPath := resolvedNmapPath
+		if eval, err := filepath.EvalSymlinks(resolvedNmapPath); err == nil && eval != "" {
+			realPath = eval
+		}
 		getcapPath, err := exec.LookPath("getcap")
 		if err == nil && getcapPath != "" {
-			out, err := exec.Command(getcapPath, resolvedNmapPath).CombinedOutput()
+			out, err := exec.Command(getcapPath, realPath).CombinedOutput()
 			if err == nil && strings.Contains(string(out), "cap_net_raw") {
 				return true
 			}

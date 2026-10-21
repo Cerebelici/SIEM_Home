@@ -58,11 +58,15 @@ func (d *Daemon) Start(ctx context.Context) error {
 	caps, err := scanner.Preflight(ctx, d.cfg, &scanner.DefaultCommandRunner{}, exec.LookPath)
 	if err != nil {
 		log.Printf("[Daemon] Preflight inspection warning: %v. Falling back to unprivileged.", err)
+		resolvedFallback := scanner.ResolveNmapBinary(d.cfg.NmapPath)
 		caps = &model.Capabilities{
-			NmapPath:      d.cfg.NmapPath,
+			NmapPath:      resolvedFallback,
 			EffectiveMode: "unprivileged",
 			Warnings:      []string{err.Error()},
 		}
+	}
+	if caps.NmapPath != "" {
+		d.cfg.NmapPath = caps.NmapPath
 	}
 	d.caps = caps
 
@@ -87,6 +91,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 		NmapPath:             caps.NmapPath,
 	}
 	persistedSettings, _ := store.GetAppSettings(ctx, defaultSettings)
+	if persistedSettings.NmapPath == "" || persistedSettings.NmapPath == "nmap" {
+		persistedSettings.NmapPath = caps.NmapPath
+	}
+	if persistedSettings.UnprivilegedMode {
+		caps.EffectiveMode = "unprivileged"
+	} else if caps.RawSocket {
+		caps.EffectiveMode = "privileged"
+	} else {
+		persistedSettings.UnprivilegedMode = true
+		caps.EffectiveMode = "unprivileged"
+	}
 	d.settings = persistedSettings
 
 	// Resolve active network interface and CIDR
@@ -522,6 +537,45 @@ func (d *Daemon) UpdateSettings(ctx context.Context, newSettings model.AppSettin
 	// Apply network mode resolution
 	d.applyNetworkSettings(&newSettings)
 
+	// Handle privilege mode toggle
+	if newSettings.UnprivilegedMode {
+		d.cfg.ForceUnprivileged = true
+		if d.caps != nil {
+			d.caps.EffectiveMode = "unprivileged"
+		}
+	} else {
+		d.cfg.ForceUnprivileged = false
+		if d.caps == nil || !d.caps.RawSocket {
+			if err := scanner.SetupPrivilegesOrInstall(ctx, d.cfg.NmapPath); err != nil {
+				newSettings.UnprivilegedMode = true
+				if d.caps != nil {
+					d.caps.EffectiveMode = "unprivileged"
+				}
+				return nil, fmt.Errorf("privilege elevation required for SYN/Raw socket mode: %w", err)
+			}
+		}
+		if caps, preErr := scanner.Preflight(ctx, d.cfg, &scanner.DefaultCommandRunner{}, exec.LookPath); preErr == nil && caps != nil {
+			if d.caps != nil {
+				*d.caps = *caps
+			} else {
+				d.caps = caps
+			}
+			if caps.NmapPath != "" {
+				d.cfg.NmapPath = caps.NmapPath
+				newSettings.NmapPath = caps.NmapPath
+			}
+		}
+		if d.caps != nil && d.caps.RawSocket {
+			d.caps.EffectiveMode = "privileged"
+			newSettings.UnprivilegedMode = false
+		} else {
+			newSettings.UnprivilegedMode = true
+			if d.caps != nil {
+				d.caps.EffectiveMode = "unprivileged"
+			}
+		}
+	}
+
 	// Persist to SQLite
 	if err := d.store.SaveAppSettings(ctx, newSettings); err != nil {
 		return nil, fmt.Errorf("saving settings: %w", err)
@@ -534,12 +588,8 @@ func (d *Daemon) UpdateSettings(ctx context.Context, newSettings model.AppSettin
 			d.scn.SetExcludeIPs(newSettings.EffectiveExcludeIP)
 		}
 		d.scn.SetScanPorts(newSettings.ScanPorts)
-
-		if newSettings.UnprivilegedMode {
-			if d.caps != nil {
-				d.caps.EffectiveMode = "unprivileged"
-				d.scn.SetCapabilities(d.caps)
-			}
+		if d.caps != nil {
+			d.scn.SetCapabilities(d.caps)
 		}
 	}
 
@@ -548,6 +598,16 @@ func (d *Daemon) UpdateSettings(ctx context.Context, newSettings model.AppSettin
 	}
 	if newSettings.VulnIntervalSec > 0 {
 		d.cfg.VulnerabilityInterval = time.Duration(newSettings.VulnIntervalSec) * time.Second
+	}
+
+	if d.sched != nil {
+		sched := d.sched
+		timeout := d.cfg.ScanTimeout
+		go func() {
+			scanCtx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			_ = sched.TriggerDiscovery(scanCtx)
+		}()
 	}
 
 	ifaces, _ := netdetect.ListActiveInterfaces()
@@ -563,17 +623,47 @@ func (d *Daemon) SetupNmapAndPrivileges(ctx context.Context) (*model.Capabilitie
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	err := scanner.SetupPrivilegesOrInstall(ctx, d.settings.NmapPath)
+	d.cfg.ForceUnprivileged = false
+	nmapTarget := d.settings.NmapPath
+	if nmapTarget == "" || nmapTarget == "nmap" {
+		nmapTarget = d.cfg.NmapPath
+	}
+
+	err := scanner.SetupPrivilegesOrInstall(ctx, nmapTarget)
 	if err != nil {
 		return d.caps, err
 	}
 
 	// Re-run preflight
 	caps, preErr := scanner.Preflight(ctx, d.cfg, &scanner.DefaultCommandRunner{}, exec.LookPath)
-	if preErr == nil {
-		d.caps = caps
+	if preErr == nil && caps != nil {
+		if d.caps != nil {
+			*d.caps = *caps
+		} else {
+			d.caps = caps
+		}
+		if caps.NmapPath != "" {
+			d.cfg.NmapPath = caps.NmapPath
+			d.settings.NmapPath = caps.NmapPath
+		}
+		if caps.RawSocket {
+			d.caps.EffectiveMode = "privileged"
+			d.settings.UnprivilegedMode = false
+		}
+		if d.store != nil {
+			_ = d.store.SaveAppSettings(ctx, d.settings)
+		}
 		if d.scn != nil {
-			d.scn.SetCapabilities(caps)
+			d.scn.SetCapabilities(d.caps)
+		}
+		if d.sched != nil {
+			sched := d.sched
+			timeout := d.cfg.ScanTimeout
+			go func() {
+				scanCtx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				_ = sched.TriggerDiscovery(scanCtx)
+			}()
 		}
 	}
 	return d.caps, preErr

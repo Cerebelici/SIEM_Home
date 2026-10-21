@@ -44,3 +44,4 @@ chmod 0755 "${DMG_ROOT}/Install and Open Cerberus.command"
 rm -f "${OUTPUT_DMG}"
 hdiutil create -volname "Cerberus Sentinel" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${OUTPUT_DMG}"
 echo "macOS DMG created: ${OUTPUT_DMG}"
+
