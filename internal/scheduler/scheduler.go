@@ -217,11 +217,15 @@ func (s *Scheduler) runImmediateVulnWorker(ctx context.Context) {
 			}
 
 			log.Printf("[Immediate Vuln Worker] 🚀 Launching immediate scan on newly discovered host %s", ip)
-			go func(targetIP string) {
+			func(targetIP string) {
 				defer s.activeTargets.Delete(targetIP)
 				// Allow newly booted endpoints a short window to finish binding ports
 				if s.cfg != nil && s.cfg.ImmediateScanDelay > 0 {
-					time.Sleep(s.cfg.ImmediateScanDelay)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(s.cfg.ImmediateScanDelay):
+					}
 				}
 
 				// Create an execution context bounded by ScanTimeout
@@ -297,11 +301,20 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 			continue
 		}
 
+		resolvedHost, resolvedVendor := discovery.ResolveHostnameAndVendor(ctx, res.IP, res.Hostname, res.Vendor, res.MAC)
+		if resolvedHost != "" {
+			res.Hostname = resolvedHost
+		}
+		if resolvedVendor != "" {
+			res.Vendor = resolvedVendor
+		}
+
 		portProfile, _ := identity.PortProfile(res.Services)
 		obs := identity.Observation{
 			IP:           res.IP,
 			MAC:          res.MAC,
 			Hostname:     res.Hostname,
+			Vendor:       res.Vendor,
 			Ports:        portProfile,
 			Fingerprints: res.Fingerprints,
 			ObservedAt:   start,

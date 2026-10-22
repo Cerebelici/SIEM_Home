@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -91,6 +92,16 @@ func Preflight(ctx context.Context, cfg *config.Config, r CommandRunner, look fu
 	rawSocket := false
 	if os.Geteuid() == 0 {
 		rawSocket = true
+	} else if runtime.GOOS == "darwin" {
+		// On macOS, desktop capture uses /dev/bpf* packet filter devices.
+		// Setuid root on Nmap is explicitly avoided because Darwin kernel restricts bind()
+		// during TCP connect version probes (mksock_bind_addr error 22 -> tcpwrapped).
+		// When /dev/bpf* is readable/writable, macOS operates in privileged desktop mode.
+		if bpfFi, err := os.Stat("/dev/bpf0"); err == nil && bpfFi.Mode().Perm()&0006 != 0 {
+			rawSocket = true
+		} else if IsSetuidRoot(resolvedPath) {
+			rawSocket = true
+		}
 	} else {
 		getcapPath, getcapLookErr := look("getcap")
 		if getcapLookErr == nil && getcapPath != "" {

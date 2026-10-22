@@ -20,6 +20,7 @@ type Observation struct {
 	IP           string
 	MAC          string
 	Hostname     string
+	Vendor       string
 	Ports        []string
 	Fingerprints []string
 	ObservedAt   time.Time

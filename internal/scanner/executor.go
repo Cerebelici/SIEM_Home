@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -177,12 +178,12 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 		"-sn",
 		"-T4",
 		"--max-retries", "2",
-		"--host-timeout", "10m",
+		"--host-timeout", "3m",
 		"-oX", "-",
 	}
 
-	if s.isUnprivileged() {
-		args = append(args, "-PS21,22,80,135,139,443,445,3000,3389,6379,8080", "-PA80,443")
+	if s.isUnprivileged() || runtime.GOOS == "darwin" {
+		args = append(args, "-PS21,22,53,80,135,139,443,445,3000,3389,3689,5000,5353,5555,6379,7000,8008,8009,8080,62078", "-PA80,443")
 	} else if s.usePrivilegedFlag() {
 		args = append(args, "--privileged")
 	}
@@ -238,18 +239,18 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 		"--version-intensity", "5",
 		"-T4",
 		"--max-retries", "2",
-		"--host-timeout", "10m",
+		"--host-timeout", "3m",
 		"--script", scriptSpec,
 		"-oX", "-",
 	}
 
-	if s.isUnprivileged() {
+	if s.isUnprivileged() || runtime.GOOS == "darwin" {
 		args = append(args, "-sT", "-Pn")
 	} else if s.usePrivilegedFlag() {
 		args = append(args, "--privileged")
 	}
 
-	// Port specification: use configurable scan ports or default to top 2000 ports
+	// Port specification: use configurable scan ports or default to top 1000 ports
 	scanPorts := ""
 	s.mu.RLock()
 	if s.scanPorts != "" {
@@ -272,8 +273,8 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 			args = append(args, "-p", scanPorts)
 		}
 	} else {
-		// Default to ports 1-10000 so services like Redis (6379, rank 5219) and custom apps (3000, 8080) are audited
-		args = append(args, "-p", "1-10000")
+		// Default to top 1000 ports for fast, responsive scanning (covers 93% of open ports)
+		args = append(args, "--top-ports", "1000")
 	}
 
 	args = append(args, s.getExcludeArgs()...)

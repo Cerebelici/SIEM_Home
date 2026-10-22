@@ -632,12 +632,16 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 		if normHost != "" && d.Hostname == "" {
 			d.Hostname = normHost
 		}
+		if obs.Vendor != "" && (d.Vendor == "" || d.Vendor == "-" || d.Vendor == "Unknown") {
+			d.Vendor = obs.Vendor
+		}
 		if dec.Confidence > d.IdentityConfidence {
 			d.IdentityConfidence = dec.Confidence
 		}
 
 		macVal := d.MAC
 		hostVal := d.Hostname
+		vendorVal := d.Vendor
 		macRandVal := 0
 		if d.MACIsRandom {
 			macRandVal = 1
@@ -650,11 +654,12 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 			mac = ?,
 			mac_is_random = ?,
 			hostname = ?,
+			vendor = ?,
 			fingerprints = ?,
 			identity_confidence = ?
 			WHERE id = ?;`
 		if _, err := eq.ExecContext(ctx, updateQuery,
-			obs.IP, observedAt, macVal, macRandVal, hostVal,
+			obs.IP, observedAt, macVal, macRandVal, hostVal, vendorVal,
 			formatFingerprintsColumn(d.Fingerprints), d.IdentityConfidence, targetID,
 		); err != nil {
 			return nil, fmt.Errorf("updating bound device: %w", err)
@@ -688,15 +693,16 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 		if conf <= 0 {
 			conf = 0.3
 		}
+		vendorVal := obs.Vendor
 
 		insertQuery := `INSERT INTO devices (
 			current_ip, mac, hostname, vendor, status, first_seen, last_seen,
 			asset_uid, mac_is_random, port_profile_hash, fingerprints, managed, identity_confidence,
 			label, criticality, notes
-		) VALUES (?, ?, ?, '', 'up', ?, ?, ?, ?, '', ?, 0, ?, '', 'normal', '');`
+		) VALUES (?, ?, ?, ?, 'up', ?, ?, ?, ?, '', ?, 0, ?, '', 'normal', '');`
 
 		res, err := eq.ExecContext(ctx, insertQuery,
-			obs.IP, normMAC, normHost, observedAt, observedAt,
+			obs.IP, normMAC, normHost, vendorVal, observedAt, observedAt,
 			newAssetUID, isRandom, formatFingerprintsColumn(normFPs), conf,
 		)
 		if err != nil {
@@ -729,6 +735,7 @@ func applyDecisionInternal(ctx context.Context, eq execQuerier, dec identity.Dec
 			MAC:                normMAC,
 			MACIsRandom:        (isRandom == 1),
 			Hostname:           normHost,
+			Vendor:             vendorVal,
 			Fingerprints:       normFPs,
 			Status:             "up",
 			FirstSeen:          observedAt,

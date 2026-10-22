@@ -113,8 +113,11 @@ func SetupPrivilegesOrInstall(ctx context.Context, nmapPath string) error {
 			if eval, err := filepath.EvalSymlinks(resolved); err == nil && eval != "" {
 				realPath = eval
 			}
-			// Set root:wheel ownership + setuid root (4755) on the resolved nmap binary and grant /dev/bpf* access
-			script = fmt.Sprintf("do shell script \"chown root:wheel '%s' && chmod 4755 '%s' && (chmod o+rw /dev/bpf* 2>/dev/null || true)\" with administrator privileges", realPath, realPath)
+			// On macOS, setuid root (chmod 4755) triggers an upstream Nmap bug in libnsock
+			// (mksock_bind_addr(): Bind failed: Invalid argument (22)) during TCP version probes,
+			// causing all ports to report as tcpwrapped.
+			// Ensure standard chmod 0755 and grant /dev/bpf* permissions.
+			script = fmt.Sprintf("do shell script \"chmod 0755 '%s' && (chmod o+rw /dev/bpf* 2>/dev/null || true)\" with administrator privileges", realPath)
 		} else {
 			// Check if bundled nmap-installer pkg is present in Resources
 			execPath, _ := os.Executable()
@@ -191,6 +194,11 @@ func IsPrivilegedScanCapable(resolvedNmapPath string) bool {
 	}
 	if IsSetuidRoot(resolvedNmapPath) {
 		return true
+	}
+	if runtime.GOOS == "darwin" {
+		if bpfFi, err := os.Stat("/dev/bpf0"); err == nil && bpfFi.Mode().Perm()&0006 != 0 {
+			return true
+		}
 	}
 	if runtime.GOOS == "linux" {
 		realPath := resolvedNmapPath

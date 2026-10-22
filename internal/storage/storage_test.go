@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gr0gu/cerberus/internal/identity"
 	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/storage"
 )
@@ -619,5 +620,66 @@ func TestDeleteService_And_Vulnerability(t *testing.T) {
 	vulnsFinal, _ := s.GetAllVulnerabilities(ctx, "")
 	if len(vulnsFinal) != 0 {
 		t.Errorf("expected 0 vulnerabilities, got %d", len(vulnsFinal))
+	}
+}
+
+func TestStorage_VendorPersistence(t *testing.T) {
+	s, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// 1. Create a device with vendor via ActionCreateNew
+	obs1 := identity.Observation{
+		IP:         "192.168.0.50",
+		MAC:        "02:00:00:11:22:33",
+		Hostname:   "Alex-iPhone",
+		Vendor:     "Apple, Inc.",
+		ObservedAt: time.Now().UTC(),
+	}
+	dec1 := identity.Decision{
+		Action:     identity.ActionCreateNew,
+		Score:      0.0,
+		Confidence: 0.8,
+	}
+
+	dev1, err := s.ApplyDecision(ctx, dec1, obs1)
+	if err != nil {
+		t.Fatalf("apply decision error: %v", err)
+	}
+	if dev1.Vendor != "Apple, Inc." {
+		t.Errorf("expected dev1.Vendor 'Apple, Inc.', got %q", dev1.Vendor)
+	}
+
+	// Fetch from DB to verify persistence
+	stored, err := s.GetDeviceByID(ctx, dev1.ID)
+	if err != nil {
+		t.Fatalf("get device error: %v", err)
+	}
+	if stored.Vendor != "Apple, Inc." {
+		t.Errorf("expected stored.Vendor 'Apple, Inc.', got %q", stored.Vendor)
+	}
+
+	// 2. Bind decision updates vendor if previously missing or enriched
+	obs2 := identity.Observation{
+		IP:         "192.168.0.50",
+		MAC:        "02:00:00:11:22:33",
+		Hostname:   "Alex-iPhone-14",
+		Vendor:     "Apple Inc.",
+		ObservedAt: time.Now().UTC(),
+	}
+	dec2 := identity.Decision{
+		Action:     identity.ActionBind,
+		DeviceID:   &dev1.ID,
+		Score:      0.95,
+		Confidence: 0.95,
+	}
+
+	dev2, err := s.ApplyDecision(ctx, dec2, obs2)
+	if err != nil {
+		t.Fatalf("apply decision bind error: %v", err)
+	}
+	if dev2.Vendor != "Apple, Inc." && dev2.Vendor != "Apple Inc." {
+		t.Errorf("expected bound device vendor to be updated or preserved, got %q", dev2.Vendor)
 	}
 }

@@ -224,10 +224,10 @@ func TestScanner_PortSelection(t *testing.T) {
 		expectedValue string
 	}{
 		{
-			name:          "default to ports 1-10000",
+			name:          "default to top 1000 ports",
 			scanPorts:     "",
-			expectedFlag:  "-p",
-			expectedValue: "1-10000",
+			expectedFlag:  "--top-ports",
+			expectedValue: "1000",
 		},
 		{
 			name:          "custom port range",

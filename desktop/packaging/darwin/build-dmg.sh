@@ -23,25 +23,9 @@ xattr -cr "${DMG_ROOT}/cerberus.app"
 codesign --force --deep --sign - "${DMG_ROOT}/cerberus.app"
 codesign --verify --deep --strict --verbose=2 "${DMG_ROOT}/cerberus.app"
 
-# 4. Add Applications symlink
-ln -s /Applications "${DMG_ROOT}/Applications"
-
-# 5. Add one-click Gatekeeper helper script for unsigned browser downloads
-cat <<'EOF' > "${DMG_ROOT}/Install and Open Cerberus.command"
-#!/bin/bash
-set -e
-DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "Installing Cerberus Sentinel to /Applications..."
-rm -rf "/Applications/cerberus.app"
-ditto "${DIR}/cerberus.app" "/Applications/cerberus.app"
-xattr -cr "/Applications/cerberus.app"
-echo "Launching Cerberus Sentinel..."
-open "/Applications/cerberus.app"
-EOF
-chmod 0755 "${DMG_ROOT}/Install and Open Cerberus.command"
-
-# 6. Create compressed DMG
+# 4. Create compressed DMG
 rm -f "${OUTPUT_DMG}"
 hdiutil create -volname "Cerberus Sentinel" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${OUTPUT_DMG}"
+rm -rf "${DMG_ROOT}"
 echo "macOS DMG created: ${OUTPUT_DMG}"
 

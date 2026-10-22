@@ -70,10 +70,19 @@ func (s *Service) Run(ctx context.Context) ([]model.Device, error) {
 	observedIDs := make([]int64, 0, len(devices))
 
 	for i := range devices {
+		resolvedHost, resolvedVendor := ResolveHostnameAndVendor(ctx, devices[i].IP, devices[i].Hostname, devices[i].Vendor, devices[i].MAC)
+		if resolvedHost != "" {
+			devices[i].Hostname = resolvedHost
+		}
+		if resolvedVendor != "" {
+			devices[i].Vendor = resolvedVendor
+		}
+
 		obs := identity.Observation{
 			IP:           devices[i].IP,
 			MAC:          devices[i].MAC,
 			Hostname:     devices[i].Hostname,
+			Vendor:       devices[i].Vendor,
 			Fingerprints: devices[i].Fingerprints,
 			ObservedAt:   start,
 		}
