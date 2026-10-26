@@ -3,6 +3,7 @@ package scanner_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -154,6 +155,9 @@ func TestExecutor_PartialXMLIsFailure(t *testing.T) {
 }
 
 func TestPreflight_SuccessPrivileged(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("raw socket detection through getcap/cap_net_raw only exists on Linux")
+	}
 	look := func(name string) (string, error) {
 		return "/usr/bin/" + name, nil
 	}
@@ -281,4 +285,3 @@ func TestScanner_PortSelection(t *testing.T) {
 		})
 	}
 }
-

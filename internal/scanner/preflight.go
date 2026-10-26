@@ -128,7 +128,9 @@ func Preflight(ctx context.Context, cfg *config.Config, r CommandRunner, look fu
 		caps.EffectiveMode = "privileged"
 	} else {
 		caps.EffectiveMode = "unprivileged"
-		if !rawSocket && !cfg.ForceUnprivileged {
+		// macOS always scans with TCP connect (see RunDiscoveryScan), so missing raw sockets
+		// change nothing there and the warning would only be noise.
+		if !rawSocket && !cfg.ForceUnprivileged && runtime.GOOS != "darwin" {
 			caps.Warnings = append(caps.Warnings, "raw socket access not available (requires root or cap_net_raw); running in unprivileged mode")
 		}
 	}

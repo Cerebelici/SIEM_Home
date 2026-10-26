@@ -1,16 +1,126 @@
 package discovery
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/identity"
 )
+
+// nameLookupTimeout bounds each mDNS, NetBIOS and reverse DNS query. Phones and IoT devices
+// on Wi-Fi in power save mode often need a few hundred milliseconds to answer.
+const nameLookupTimeout = 300 * time.Millisecond
+
+var (
+	vendorDBMu sync.RWMutex
+	vendorDB   map[string]string // upper-case hex prefix (6, 7 or 9 digits) -> vendor
+)
+
+// LoadVendorDatabase loads the IEEE OUI vendor list (nmap-mac-prefixes) that is installed
+// with nmap, so vendor lookup covers every registered MAC prefix and not only the small
+// built-in list. It returns the number of loaded prefixes.
+func LoadVendorDatabase(nmapPath string) (int, error) {
+	for _, candidate := range vendorDatabaseCandidates(nmapPath) {
+		f, err := os.Open(candidate)
+		if err != nil {
+			continue
+		}
+		db, err := parseVendorDatabase(f)
+		_ = f.Close()
+		if err != nil || len(db) == 0 {
+			continue
+		}
+		vendorDBMu.Lock()
+		vendorDB = db
+		vendorDBMu.Unlock()
+		return len(db), nil
+	}
+	return 0, fmt.Errorf("nmap-mac-prefixes not found next to %q", nmapPath)
+}
+
+func vendorDatabaseCandidates(nmapPath string) []string {
+	var dirs []string
+	if dir := os.Getenv("NMAPDIR"); dir != "" {
+		dirs = append(dirs, dir)
+	}
+	bins := []string{nmapPath}
+	if real, err := filepath.EvalSymlinks(nmapPath); err == nil && real != nmapPath {
+		bins = append(bins, real)
+	}
+	for _, bin := range bins {
+		if bin == "" || !filepath.IsAbs(bin) {
+			continue
+		}
+		binDir := filepath.Dir(bin)
+		dirs = append(dirs, binDir, filepath.Join(binDir, "..", "share", "nmap"))
+	}
+	dirs = append(dirs, "/opt/homebrew/share/nmap", "/usr/local/share/nmap", "/opt/local/share/nmap", "/usr/share/nmap")
+
+	paths := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		paths = append(paths, filepath.Join(dir, "nmap-mac-prefixes"))
+	}
+	return paths
+}
+
+func parseVendorDatabase(f *os.File) (map[string]string, error) {
+	db := make(map[string]string, 52000)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		prefix, vendor, ok := strings.Cut(line, " ")
+		vendor = strings.TrimSpace(vendor)
+		if !ok || vendor == "" {
+			continue
+		}
+		switch len(prefix) {
+		case 6, 7, 9:
+			db[strings.ToUpper(prefix)] = vendor
+		}
+	}
+	return db, scanner.Err()
+}
+
+// lookupVendorDatabase returns the vendor for the longest matching registered prefix.
+func lookupVendorDatabase(cleanMAC string) string {
+	vendorDBMu.RLock()
+	defer vendorDBMu.RUnlock()
+	if vendorDB == nil {
+		return ""
+	}
+	for _, n := range []int{9, 7, 6} {
+		if len(cleanMAC) >= n {
+			if vendor, ok := vendorDB[cleanMAC[:n]]; ok {
+				return vendor
+			}
+		}
+	}
+	return ""
+}
+
+// usableHostname drops names that do not identify a device, such as the "localhost" that
+// some devices announce over mDNS, or the IP address itself.
+func usableHostname(name, ip string) string {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".")
+	name = strings.TrimSuffix(name, ".local")
+	switch strings.ToLower(name) {
+	case "", "-", "localhost", "localhost.localdomain", ip:
+		return ""
+	}
+	return name
+}
 
 // ResolveHostnameAndVendor enriches discovery findings with local network mDNS,
 // NetBIOS, and reverse DNS PTR lookups, as well as signature-based vendor inference.
@@ -18,21 +128,19 @@ func ResolveHostnameAndVendor(ctx context.Context, ip string, currentHost, curre
 	hostname := strings.TrimSpace(currentHost)
 	vendor := strings.TrimSpace(currentVendor)
 
-	if hostname == "-" || hostname == ip {
-		hostname = ""
-	}
+	hostname = usableHostname(hostname, ip)
 	if vendor == "-" || strings.EqualFold(vendor, "unknown") {
 		vendor = ""
 	}
 
 	// 1. Hostname Resolution (if missing)
-	// Query mDNS, NetBIOS, and reverse DNS in parallel with a fast LAN timeout (~70ms)
+	// Query mDNS, NetBIOS, and reverse DNS in parallel and keep the first usable answer.
 	if hostname == "" {
 		resCh := make(chan string, 3)
 
 		// mDNS PTR query (Apple iOS/macOS & Android mDNS)
 		go func() {
-			if mdnsName, err := QueryMDNSPTR(ctx, ip, 60*time.Millisecond); err == nil && mdnsName != "" {
+			if mdnsName := usableHostname(queryOrEmpty(QueryMDNSPTR(ctx, ip, nameLookupTimeout)), ip); mdnsName != "" {
 				select {
 				case resCh <- mdnsName:
 				default:
@@ -42,7 +150,7 @@ func ResolveHostnameAndVendor(ctx context.Context, ip string, currentHost, curre
 
 		// NetBIOS node status query (Windows, Samba, Android SMB)
 		go func() {
-			if nbName, err := QueryNetBIOS(ctx, ip, 60*time.Millisecond); err == nil && nbName != "" {
+			if nbName := usableHostname(queryOrEmpty(QueryNetBIOS(ctx, ip, nameLookupTimeout)), ip); nbName != "" {
 				select {
 				case resCh <- nbName:
 				default:
@@ -52,13 +160,11 @@ func ResolveHostnameAndVendor(ctx context.Context, ip string, currentHost, curre
 
 		// Standard reverse DNS lookup
 		go func() {
-			dnsCtx, cancel := context.WithTimeout(ctx, 60*time.Millisecond)
+			dnsCtx, cancel := context.WithTimeout(ctx, nameLookupTimeout)
 			defer cancel()
 			names, err := net.DefaultResolver.LookupAddr(dnsCtx, ip)
 			if err == nil && len(names) > 0 {
-				cleanName := strings.TrimSuffix(names[0], ".")
-				cleanName = strings.TrimSuffix(cleanName, ".local")
-				if cleanName != "" && cleanName != ip {
+				if cleanName := usableHostname(names[0], ip); cleanName != "" {
 					select {
 					case resCh <- cleanName:
 					default:
@@ -70,7 +176,7 @@ func ResolveHostnameAndVendor(ctx context.Context, ip string, currentHost, curre
 		select {
 		case name := <-resCh:
 			hostname = name
-		case <-time.After(70 * time.Millisecond):
+		case <-time.After(nameLookupTimeout + 20*time.Millisecond):
 		case <-ctx.Done():
 		}
 	}
@@ -86,7 +192,7 @@ func ResolveHostnameAndVendor(ctx context.Context, ip string, currentHost, curre
 		}
 	}
 
-	// 3. Fallback OUI Lookup if vendor is still missing and MAC is a globally unique IEEE address
+	// 3. OUI Lookup if vendor is still missing and MAC is a globally unique IEEE address
 	if vendor == "" && normMAC != "" && !isRandomMAC {
 		if ouiVendor := LookupOUIPrefix(normMAC); ouiVendor != "" {
 			vendor = ouiVendor
@@ -453,11 +559,23 @@ func QueryNetBIOS(ctx context.Context, targetIP string, timeout time.Duration) (
 	return "", fmt.Errorf("no NetBIOS workstation name found")
 }
 
-// LookupOUIPrefix checks well-known vendor OUI prefixes as a fast fallback.
+// queryOrEmpty returns name when the lookup succeeded, or "" when it failed.
+func queryOrEmpty(name string, err error) string {
+	if err != nil {
+		return ""
+	}
+	return name
+}
+
+// LookupOUIPrefix returns the vendor registered for the MAC address prefix. It uses the
+// nmap vendor database when LoadVendorDatabase found it, else a small built-in list.
 func LookupOUIPrefix(mac string) string {
 	clean := strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", ""), "-", ""))
 	if len(clean) < 6 {
 		return ""
+	}
+	if vendor := lookupVendorDatabase(clean); vendor != "" {
+		return vendor
 	}
 	prefix := clean[:6]
 

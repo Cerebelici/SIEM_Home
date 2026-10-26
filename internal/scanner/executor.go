@@ -3,7 +3,9 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"os/exec"
 	"runtime"
@@ -43,6 +45,7 @@ type Scanner struct {
 	cfg        *config.Config
 	runner     CommandRunner
 	caps       *model.Capabilities
+	neighbors  NeighborSource
 	mu         sync.RWMutex
 	excludeIPs []string
 	scanPorts  string
@@ -55,9 +58,10 @@ func New(cfg *config.Config, caps ...*model.Capabilities) *Scanner {
 		c = caps[0]
 	}
 	s := &Scanner{
-		cfg:    cfg,
-		runner: &DefaultCommandRunner{},
-		caps:   c,
+		cfg:       cfg,
+		runner:    &DefaultCommandRunner{},
+		caps:      c,
+		neighbors: ReadNeighborTable,
 	}
 	if cfg != nil && cfg.ScanPorts != "" {
 		s.scanPorts = cfg.ScanPorts
@@ -80,6 +84,14 @@ func NewWithRunner(cfg *config.Config, runner CommandRunner, caps ...*model.Capa
 		s.scanPorts = cfg.ScanPorts
 	}
 	return s
+}
+
+// SetNeighborSource sets where discovery reads recently resolved link-layer neighbors from.
+// A nil source turns the ARP table merge off.
+func (s *Scanner) SetNeighborSource(src NeighborSource) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.neighbors = src
 }
 
 // SetCapabilities updates the capability profile for the scanner.
@@ -117,13 +129,17 @@ func (s *Scanner) SetScanPorts(ports string) {
 	s.scanPorts = strings.TrimSpace(ports)
 }
 
-func (s *Scanner) getExcludeArgs() []string {
+func (s *Scanner) excludedIPs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.excludeIPs) > 0 {
-		return []string{"--exclude", strings.Join(s.excludeIPs, ",")}
+	return append([]string(nil), s.excludeIPs...)
+}
+
+func (s *Scanner) getExcludeArgs() []string {
+	if excluded := s.excludedIPs(); len(excluded) > 0 {
+		return []string{"--exclude", strings.Join(excluded, ",")}
 	}
-	return []string{"--exclude", "172.28.0.1,172.28.0.5"}
+	return nil
 }
 
 func (s *Scanner) nmapBinary() string {
@@ -174,11 +190,17 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 		}
 	}
 
+	// Most addresses in a LAN sweep are unused, and an unprivileged TCP ping waits for each
+	// probe to time out. A LAN answers in well under 500 ms, so the RTT cap, one retry and a
+	// higher minimum parallelism cut a /24 sweep from about 2.5 minutes to about 35 seconds.
+	// Hosts that miss the TCP probes are still found through the ARP table merge below.
 	args := []string{
 		"-sn",
 		"-T4",
-		"--max-retries", "2",
-		"--host-timeout", "3m",
+		"--max-retries", "1",
+		"--max-rtt-timeout", "500ms",
+		"--min-parallelism", "64",
+		"--host-timeout", "30s",
 		"-oX", "-",
 	}
 
@@ -205,7 +227,26 @@ func (s *Scanner) RunDiscoveryScan(ctx context.Context, target string) ([]model.
 	}
 
 	devices := ExtractDevices(run)
+	if entries := s.readNeighbors(ctx); entries != nil {
+		devices = mergeNeighbors(devices, entries, target, s.excludedIPs())
+	}
 	return devices, nil
+}
+
+// readNeighbors returns the recently confirmed ARP entries, or nil when none can be read.
+func (s *Scanner) readNeighbors(ctx context.Context) []Neighbor {
+	s.mu.RLock()
+	neighbors := s.neighbors
+	s.mu.RUnlock()
+	if neighbors == nil {
+		return nil
+	}
+	entries, err := neighbors(ctx)
+	if err != nil {
+		log.Printf("[Scanner] Could not read the ARP table: %v", err)
+		return nil
+	}
+	return entries
 }
 
 // RunVulnerabilityScan executes service detection, cryptographic identity scripts, and vulnerability scripts against target IPs.
@@ -234,12 +275,15 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 		scriptSpec += ",ssh-hostkey,ssl-cert"
 	}
 
+	// nmap drops every result of a host that hits --host-timeout. Phones and routers that
+	// silently drop most of the 1000 probed ports need a few minutes over TCP connect, so the
+	// limit is generous; the whole scan stays bounded by ScanTimeout.
 	args := []string{
 		"-sV",
 		"--version-intensity", "5",
 		"-T4",
 		"--max-retries", "2",
-		"--host-timeout", "3m",
+		"--host-timeout", "10m",
 		"--script", scriptSpec,
 		"-oX", "-",
 	}
@@ -294,5 +338,34 @@ func (s *Scanner) RunVulnerabilityScan(ctx context.Context, targets []string) ([
 	}
 
 	results := ExtractHostResults(run)
+	// Unprivileged scans cannot read MAC addresses. Without one, the identity matcher cannot
+	// tie the result to the device that discovery recorded with its MAC.
+	if entries := s.readNeighbors(ctx); entries != nil {
+		macs := make(map[string]string, len(entries))
+		for _, n := range entries {
+			macs[n.IP] = n.MAC
+		}
+		for i := range results {
+			if results[i].MAC == "" {
+				results[i].MAC = macs[results[i].IP]
+			}
+		}
+	}
 	return results, nil
+}
+
+// DescribeScanError turns a scan failure into a message for the scan history. A scan cut
+// short by shutdown or by its time limit says so, instead of showing the raw "signal:
+// killed" error of the stopped nmap process.
+func DescribeScanError(ctx context.Context, err error) string {
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return "scan interrupted: Cerberus Sentinel stopped before the scan finished"
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "scan timed out before it finished"
+	case err == nil:
+		return ""
+	default:
+		return err.Error()
+	}
 }
