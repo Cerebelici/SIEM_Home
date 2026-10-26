@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"net/http"
 
+	"github.com/gr0gu/cerberus/internal/api"
 	"github.com/gr0gu/cerberus/internal/app"
 	"github.com/gr0gu/cerberus/internal/model"
 )
@@ -196,32 +199,33 @@ func (b *Bridge) GetScans(limit int) (map[string]any, error) {
 }
 
 // TriggerDiscovery initiates an immediate host discovery sweep.
+// The result has the same body as POST /api/scans/discovery/trigger; a scan that is already
+// in progress gives status "conflict" (HTTP 409) instead of an error.
 func (b *Bridge) TriggerDiscovery() (map[string]string, error) {
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := b.d.TriggerDiscovery(ctx); err != nil {
-		return nil, err
-	}
-	return map[string]string{
-		"message": "Discovery scan initiated in background",
-		"status":  "running",
-	}, nil
+	return b.requestScan(api.ScanTypeDiscovery)
 }
 
 // TriggerVulnerabilityScan initiates an immediate vulnerability audit.
+// The result has the same body as POST /api/scans/vulnerability/trigger.
 func (b *Bridge) TriggerVulnerabilityScan() (map[string]string, error) {
-	ctx := b.ctx
-	if ctx == nil {
-		ctx = context.Background()
+	return b.requestScan(api.ScanTypeVulnerability)
+}
+
+func (b *Bridge) requestScan(scanType string) (map[string]string, error) {
+	result := b.d.RequestScan(scanType)
+	if result.HTTPStatus >= http.StatusInternalServerError {
+		return nil, errors.New(result.Body["error"])
 	}
-	if err := b.d.TriggerVulnerabilityScan(ctx); err != nil {
-		return nil, err
-	}
-	return map[string]string{
-		"message": "Vulnerability audit initiated in background",
-		"status":  "running",
+	return result.Body, nil
+}
+
+// GetLogs returns the recent lines of the daemon log, oldest first. New lines are sent
+// as "cerberus:log" events.
+func (b *Bridge) GetLogs() (map[string]any, error) {
+	entries := b.d.Logs()
+	return map[string]any{
+		"count": len(entries),
+		"logs":  entries,
 	}, nil
 }
 

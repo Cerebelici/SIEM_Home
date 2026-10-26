@@ -12,6 +12,8 @@ import (
 
 	"github.com/gr0gu/cerberus/internal/api"
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/discovery"
+	"github.com/gr0gu/cerberus/internal/logstream"
 	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/netdetect"
 	"github.com/gr0gu/cerberus/internal/scanner"
@@ -26,6 +28,7 @@ type Daemon struct {
 	sched     *scheduler.Scheduler
 	scn       *scanner.Scanner
 	srv       *api.Server
+	logs      *logstream.Buffer
 	caps      *model.Capabilities
 	settings  model.AppSettings
 	daemonCtx context.Context
@@ -43,6 +46,31 @@ func New(cfg *config.Config) *Daemon {
 		cfg:   cfg,
 		errCh: make(chan error, 1),
 	}
+}
+
+// localNetworkWait is how long a discovery sweep waits for the user to allow local network
+// access on macOS (the system prompt appears on the first sweep after install).
+const localNetworkWait = 60 * time.Second
+
+// interruptedScanMessage is stored on scans that a previous process left as running.
+const interruptedScanMessage = "scan interrupted: Cerberus Sentinel stopped before the scan finished"
+
+// SetLogs sets the buffer with the daemon log, served to the UI. Call it before Start.
+func (d *Daemon) SetLogs(logs *logstream.Buffer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.logs = logs
+}
+
+// Logs returns the recent daemon log lines, oldest first.
+func (d *Daemon) Logs() []logstream.Entry {
+	d.mu.Lock()
+	logs := d.logs
+	d.mu.Unlock()
+	if logs == nil {
+		return []logstream.Entry{}
+	}
+	return logs.Entries()
 }
 
 // Start boots preflight, storage, scheduler, and optionally the HTTP server.
@@ -70,10 +98,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	d.caps = caps
 
+	if n, err := discovery.LoadVendorDatabase(caps.NmapPath); err != nil {
+		log.Printf("[Daemon] Warning: MAC vendor database not loaded (%v); using the built-in vendor list", err)
+	} else {
+		log.Printf("[Daemon] Loaded %d MAC vendor prefixes from the nmap installation", n)
+	}
+
 	// 2. Initialize persistent storage
 	store, err := storage.New(d.cfg.DBPath)
 	if err != nil {
 		return fmt.Errorf("initializing storage: %w", err)
+	}
+
+	// A scan that a previous process left as "running" can never finish now.
+	if n, err := store.FailInterruptedScans(ctx, interruptedScanMessage); err != nil {
+		log.Printf("[Daemon] Failed to close interrupted scans: %v", err)
+	} else if n > 0 {
+		log.Printf("[Daemon] Warning: %d scan(s) of the previous run did not finish; recorded them as interrupted", n)
 	}
 
 	// Optional mock data seeding
@@ -90,6 +131,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		UnprivilegedMode:     d.cfg.ForceUnprivileged || caps.EffectiveMode == "unprivileged",
 		NmapPath:             caps.NmapPath,
 	}
+	// An explicit CERBERUS_SUBNET is the starting target; auto-detection would replace it.
+	if !d.cfg.AutoDetectNetwork && d.cfg.NetworkCIDR != "" {
+		defaultSettings.NetworkMode = "custom"
+		defaultSettings.CustomNetworkCIDR = d.cfg.NetworkCIDR
+	}
 	persistedSettings, _ := store.GetAppSettings(ctx, defaultSettings)
 	if persistedSettings.NmapPath == "" || persistedSettings.NmapPath == "nmap" {
 		persistedSettings.NmapPath = caps.NmapPath
@@ -104,8 +150,19 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	d.settings = persistedSettings
 
+	// Saved intervals win over the environment defaults.
+	if d.settings.DiscoveryIntervalSec > 0 {
+		d.cfg.DiscoveryInterval = time.Duration(d.settings.DiscoveryIntervalSec) * time.Second
+	}
+	if d.settings.VulnIntervalSec > 0 {
+		d.cfg.VulnerabilityInterval = time.Duration(d.settings.VulnIntervalSec) * time.Second
+	}
+
 	// Resolve active network interface and CIDR
 	d.applyNetworkSettings(&d.settings)
+	if d.settings.EffectiveCIDR != "" {
+		d.cfg.NetworkCIDR = d.settings.EffectiveCIDR
+	}
 
 	// 4. Initialize scanner, scheduler, and API server
 	scn := scanner.New(d.cfg, caps)
@@ -118,25 +175,35 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.scn = scn
 
 	sched := scheduler.New(d.cfg, store, scn)
+	sched.SetLocalNetworkCheck(func(ctx context.Context) error {
+		return netdetect.WaitForLocalNetworkAccess(ctx, localNetworkWait)
+	})
 	srv := api.NewServer(d.cfg, store, sched, caps)
 	sched.SetPostureService(srv.PostureService())
+	srv.SetLogs(d.logs)
+	srv.SetSettingsProvider(d)
 
-	// 5. Establish independent daemon execution context
-	d.daemonCtx, d.cancel = context.WithCancel(context.Background())
-
-	// 6. Start background workers with daemon context
-	sched.Start(d.daemonCtx)
-
-	// 7. Bind and serve HTTP requests only if not explicitly disabled (e.g. desktop IPC mode)
+	// 5. Bind the HTTP listener before any worker starts, so a busy port fails fast instead of
+	// leaving scans (and their nmap processes) running after Start returned an error.
+	var ln net.Listener
 	if !d.cfg.DisableHTTPServer {
 		addr := fmt.Sprintf("%s:%d", d.cfg.ServerHost, d.cfg.ServerPort)
-		ln, err := net.Listen("tcp", addr)
+		ln, err = net.Listen("tcp", addr)
 		if err != nil {
 			_ = store.Close()
 			return fmt.Errorf("binding server address %s: %w", addr, err)
 		}
-		d.ln = ln
+	}
 
+	// 6. Establish independent daemon execution context
+	d.daemonCtx, d.cancel = context.WithCancel(context.Background())
+
+	// 7. Start background workers with daemon context
+	sched.Start(d.daemonCtx)
+
+	// 8. Serve HTTP requests only if not explicitly disabled (e.g. desktop IPC mode)
+	if ln != nil {
+		d.ln = ln
 		go func() {
 			if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
 				select {
@@ -158,11 +225,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 	return nil
 }
 
+// applyNetworkSettings resolves the subnet to scan (EffectiveCIDR) and the own address to
+// exclude from scans for the selected network mode.
 func (d *Daemon) applyNetworkSettings(s *model.AppSettings) {
 	switch s.NetworkMode {
 	case "custom":
 		if s.CustomNetworkCIDR != "" {
-			d.cfg.NetworkCIDR = s.CustomNetworkCIDR
 			s.EffectiveCIDR = s.CustomNetworkCIDR
 		}
 	case "interface":
@@ -170,7 +238,6 @@ func (d *Daemon) applyNetworkSettings(s *model.AppSettings) {
 		if err == nil {
 			for _, iface := range ifaces {
 				if iface.Name == s.SelectedInterface {
-					d.cfg.NetworkCIDR = iface.CIDR
 					s.EffectiveCIDR = iface.CIDR
 					s.EffectiveExcludeIP = iface.IPv4
 					return
@@ -181,7 +248,6 @@ func (d *Daemon) applyNetworkSettings(s *model.AppSettings) {
 	default: // "auto"
 		def, err := netdetect.DetectDefaultNetwork()
 		if err == nil && def != nil {
-			d.cfg.NetworkCIDR = def.CIDR
 			s.SelectedInterface = def.Name
 			s.EffectiveCIDR = def.CIDR
 			s.EffectiveExcludeIP = def.IPv4
@@ -485,40 +551,14 @@ func (d *Daemon) GetScans(ctx context.Context, limit int) ([]model.ScanLog, erro
 	return scans, nil
 }
 
-// TriggerDiscovery initiates an immediate network discovery scan.
-func (d *Daemon) TriggerDiscovery(ctx context.Context) error {
+// RequestScan asks for a manual scan ("discovery" or "vulnerability") without waiting for
+// it. The result matches POST /api/scans/{type}/trigger: 202 accepted, 409 when a scan of
+// that type is already in progress, 503 when the scheduler is not running.
+func (d *Daemon) RequestScan(scanType string) api.ManualScanResult {
 	d.mu.Lock()
 	sched := d.sched
 	d.mu.Unlock()
-
-	if sched == nil {
-		return fmt.Errorf("scheduler not initialized")
-	}
-
-	go func() {
-		scanCtx, cancel := context.WithTimeout(context.Background(), d.cfg.ScanTimeout)
-		defer cancel()
-		_ = sched.TriggerDiscovery(scanCtx)
-	}()
-	return nil
-}
-
-// TriggerVulnerabilityScan initiates an immediate vulnerability audit.
-func (d *Daemon) TriggerVulnerabilityScan(ctx context.Context) error {
-	d.mu.Lock()
-	sched := d.sched
-	d.mu.Unlock()
-
-	if sched == nil {
-		return fmt.Errorf("scheduler not initialized")
-	}
-
-	go func() {
-		scanCtx, cancel := context.WithTimeout(context.Background(), d.cfg.ScanTimeout)
-		defer cancel()
-		_ = sched.TriggerVulnerabilityScan(scanCtx)
-	}()
-	return nil
+	return api.RequestManualScan(sched, scanType)
 }
 
 // GetPosture returns the live fleet posture report.
@@ -588,6 +628,9 @@ func (d *Daemon) UpdateSettings(ctx context.Context, newSettings model.AppSettin
 
 	// Apply network mode resolution
 	d.applyNetworkSettings(&newSettings)
+	if newSettings.EffectiveCIDR == "" {
+		return nil, fmt.Errorf("no network to scan: the selected mode did not resolve to a subnet")
+	}
 
 	// Handle privilege mode toggle
 	if newSettings.UnprivilegedMode {
@@ -645,21 +688,14 @@ func (d *Daemon) UpdateSettings(ctx context.Context, newSettings model.AppSettin
 		}
 	}
 
-	if newSettings.DiscoveryIntervalSec > 0 {
-		d.cfg.DiscoveryInterval = time.Duration(newSettings.DiscoveryIntervalSec) * time.Second
-	}
-	if newSettings.VulnIntervalSec > 0 {
-		d.cfg.VulnerabilityInterval = time.Duration(newSettings.VulnIntervalSec) * time.Second
-	}
-
 	if d.sched != nil {
-		sched := d.sched
-		timeout := d.cfg.ScanTimeout
-		go func() {
-			scanCtx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-			_ = sched.TriggerDiscovery(scanCtx)
-		}()
+		d.sched.SetDiscoveryTarget(newSettings.EffectiveCIDR)
+		d.sched.SetIntervals(
+			time.Duration(newSettings.DiscoveryIntervalSec)*time.Second,
+			time.Duration(newSettings.VulnIntervalSec)*time.Second,
+		)
+		// Sweep the (possibly new) network now. A sweep already running is fine too.
+		_ = d.sched.RequestDiscovery()
 	}
 
 	ifaces, _ := netdetect.ListActiveInterfaces()
@@ -709,15 +745,8 @@ func (d *Daemon) SetupNmapAndPrivileges(ctx context.Context) (*model.Capabilitie
 			d.scn.SetCapabilities(d.caps)
 		}
 		if d.sched != nil {
-			sched := d.sched
-			timeout := d.cfg.ScanTimeout
-			go func() {
-				scanCtx, cancel := context.WithTimeout(context.Background(), timeout)
-				defer cancel()
-				_ = sched.TriggerDiscovery(scanCtx)
-			}()
+			_ = d.sched.RequestDiscovery()
 		}
 	}
 	return d.caps, preErr
 }
-

@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gr0gu/cerberus/internal/logstream"
 	"github.com/gr0gu/cerberus/internal/model"
+	"github.com/gr0gu/cerberus/internal/scheduler"
 )
 
 // handleGetDevices returns all tracked devices, with optional ?status=up|down filter.
@@ -422,30 +424,108 @@ func (s *Server) handleGetScans(w http.ResponseWriter, r *http.Request) {
 
 // handleTriggerDiscovery launches an immediate network discovery scan.
 func (s *Server) handleTriggerDiscovery(w http.ResponseWriter, r *http.Request) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ScanTimeout)
-		defer cancel()
-		_ = s.scheduler.TriggerDiscovery(ctx)
-	}()
-
-	writeJSON(w, http.StatusAccepted, map[string]string{
-		"message": "Discovery scan initiated in background",
-		"status":  "running",
-	})
+	s.dispatchManualScan(w, ScanTypeDiscovery)
 }
 
 // handleTriggerVuln launches an immediate vulnerability scan across active devices.
 func (s *Server) handleTriggerVuln(w http.ResponseWriter, r *http.Request) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ScanTimeout)
-		defer cancel()
-		_ = s.scheduler.TriggerVulnerabilityScan(ctx)
-	}()
+	s.dispatchManualScan(w, ScanTypeVulnerability)
+}
 
-	writeJSON(w, http.StatusAccepted, map[string]string{
-		"message": "Vulnerability audit initiated in background",
-		"status":  "running",
+// Scan types an operator can trigger manually.
+const (
+	ScanTypeDiscovery     = "discovery"
+	ScanTypeVulnerability = "vulnerability"
+)
+
+// ManualScanResult is the outcome of a manual scan request, shared by the HTTP API and the
+// desktop IPC bridge so both report the same contract.
+type ManualScanResult struct {
+	HTTPStatus int               // 202 accepted, 409 already in progress, 503 no scheduler
+	Body       map[string]string // message/status/scan_type, or error/status/scan_type
+}
+
+// RequestManualScan hands a manual scan to the scheduler worker without waiting for it.
+// Clients follow the outcome through GET /api/status (is_*_running) and GET /api/scans.
+func RequestManualScan(sched *scheduler.Scheduler, scanType string) ManualScanResult {
+	if sched == nil {
+		return ManualScanResult{http.StatusServiceUnavailable, map[string]string{
+			"error":     "scan scheduler is not available",
+			"status":    "unavailable",
+			"scan_type": scanType,
+		}}
+	}
+
+	request, message := sched.RequestDiscovery, "Discovery scan initiated in background"
+	if scanType == ScanTypeVulnerability {
+		request, message = sched.RequestVulnerabilityScan, "Vulnerability audit initiated in background"
+	}
+	if err := request(); err != nil {
+		return ManualScanResult{http.StatusConflict, map[string]string{
+			"error":     fmt.Sprintf("A %s scan is already in progress", scanType),
+			"status":    "conflict",
+			"scan_type": scanType,
+		}}
+	}
+	return ManualScanResult{http.StatusAccepted, map[string]string{
+		"message":   message,
+		"status":    "running",
+		"scan_type": scanType,
+	}}
+}
+
+func (s *Server) dispatchManualScan(w http.ResponseWriter, scanType string) {
+	result := RequestManualScan(s.scheduler, scanType)
+	writeJSON(w, result.HTTPStatus, result.Body)
+}
+
+// handleGetLogs returns the recent lines of the daemon log.
+func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
+	entries := []logstream.Entry{}
+	if s.logs != nil {
+		entries = s.logs.Entries()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": len(entries),
+		"logs":  entries,
 	})
+}
+
+// handleGetSettings returns the active settings, network interfaces and scanner capabilities.
+func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "settings are not available"})
+		return
+	}
+	resp, err := s.settings.GetSettings(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleUpdateSettings saves new settings and applies them to the running scanner.
+func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	if !s.isAuthorizedForMutation(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized: loopback or API key required"})
+		return
+	}
+	if s.settings == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "settings are not available"})
+		return
+	}
+	var req model.AppSettings
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json body"})
+		return
+	}
+	resp, err := s.settings.UpdateSettings(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // GetStatus evaluates and returns the full system status metrics.
@@ -514,7 +594,11 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleExportJSON returns the full network sentinel dataset formatted as JSON.
 func (s *Server) handleExportJSON(w http.ResponseWriter, r *http.Request) {
-	data, err := s.storage.ExportAllData(r.Context(), s.cfg.NetworkCIDR)
+	cidr := s.cfg.NetworkCIDR
+	if s.scheduler != nil {
+		cidr = s.scheduler.DiscoveryTarget()
+	}
+	data, err := s.storage.ExportAllData(r.Context(), cidr)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

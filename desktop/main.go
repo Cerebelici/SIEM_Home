@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"embed"
+	"io"
 	"log"
+	"os"
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/app"
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/logstream"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -17,7 +20,14 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// logHistory is how many daemon log lines the Debug page can show.
+const logHistory = 2000
+
 func main() {
+	// Keep the daemon log in memory for the Debug page, and still write it to stderr.
+	logs := logstream.New(logHistory)
+	log.SetOutput(io.MultiWriter(os.Stderr, logs))
+
 	cfg := config.Load()
 	if cfg.DBPath == "cerberus.db" {
 		cfg.DBPath = config.OSDataDir("cerberus", "cerberus.db")
@@ -26,6 +36,7 @@ func main() {
 	cfg.DisableHTTPServer = true
 
 	d := app.New(cfg)
+	d.SetLogs(logs)
 	b := NewBridge(d)
 
 	err := wails.Run(&options.App{
@@ -45,6 +56,9 @@ func main() {
 		},
 		OnStartup: func(ctx context.Context) {
 			b.SetContext(ctx)
+			logs.Subscribe(func(entry logstream.Entry) {
+				runtime.EventsEmit(ctx, "cerberus:log", entry)
+			})
 			if err := d.Start(context.Background()); err != nil {
 				runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
 					Type:    runtime.ErrorDialog,
@@ -71,4 +85,3 @@ func main() {
 		log.Fatal(err)
 	}
 }
-

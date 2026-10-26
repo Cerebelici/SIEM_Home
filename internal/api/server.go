@@ -15,6 +15,7 @@ import (
 	"github.com/gr0gu/cerberus/internal/config"
 	"github.com/gr0gu/cerberus/internal/detect"
 	"github.com/gr0gu/cerberus/internal/ingest"
+	"github.com/gr0gu/cerberus/internal/logstream"
 	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/posture"
 	"github.com/gr0gu/cerberus/internal/scheduler"
@@ -32,6 +33,14 @@ type Server struct {
 	dispatcher     *ingest.Dispatcher
 	engine         *detect.Engine
 	postureService *posture.Service
+	logs           *logstream.Buffer
+	settings       SettingsProvider
+}
+
+// SettingsProvider reads and changes the application settings. The daemon implements it.
+type SettingsProvider interface {
+	GetSettings(ctx context.Context) (*model.SettingsResponse, error)
+	UpdateSettings(ctx context.Context, req model.AppSettings) (*model.SettingsResponse, error)
 }
 
 // NewServer configures routes, middleware, and returns a new Server instance.
@@ -84,6 +93,9 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 	mux.HandleFunc("POST /api/scans/discovery/trigger", s.handleTriggerDiscovery)
 	mux.HandleFunc("POST /api/scans/vulnerability/trigger", s.handleTriggerVuln)
 	mux.HandleFunc("GET /api/status", s.handleGetStatus)
+	mux.HandleFunc("GET /api/logs", s.handleGetLogs)
+	mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
 	mux.HandleFunc("GET /api/export/json", s.handleExportJSON)
 
 	// Posture & CVSS Aggregator API (DEV-05)
@@ -127,6 +139,16 @@ func NewServer(cfg *config.Config, store *storage.Storage, sched *scheduler.Sche
 // Handler returns the configured http.Handler (useful for unit/integration testing).
 func (s *Server) Handler() http.Handler {
 	return s.server.Handler
+}
+
+// SetLogs sets the daemon log buffer served by GET /api/logs.
+func (s *Server) SetLogs(logs *logstream.Buffer) {
+	s.logs = logs
+}
+
+// SetSettingsProvider sets the provider behind GET and PUT /api/settings.
+func (s *Server) SetSettingsProvider(p SettingsProvider) {
+	s.settings = p
 }
 
 // SetCapabilities updates the server's capability profile.
@@ -185,8 +207,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/agent/") {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Cerberus-Agent-Id")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Cerberus-Agent-Id, X-API-Key")
 
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -208,6 +230,13 @@ func (rw *statusResponseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+// pollingPaths are read every few seconds by the dashboard. Logging each successful read
+// would bury the daemon log (and GET /api/logs would log itself on every poll).
+var pollingPaths = map[string]bool{
+	"/api/status": true,
+	"/api/logs":   true,
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -215,6 +244,9 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(wrapped, r)
 
+		if r.Method == http.MethodGet && pollingPaths[r.URL.Path] && wrapped.statusCode < http.StatusBadRequest {
+			return
+		}
 		log.Printf("[API] %s %s -> %d in %v",
 			r.Method, r.URL.Path, wrapped.statusCode, time.Since(start))
 	})

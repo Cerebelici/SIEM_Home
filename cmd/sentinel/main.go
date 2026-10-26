@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gr0gu/cerberus/internal/app"
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/logstream"
 )
 
 const banner = `
@@ -23,6 +25,10 @@ const banner = `
 `
 
 func main() {
+	// Keep the daemon log in memory for GET /api/logs, and still write it to stderr.
+	logs := logstream.New(2000)
+	log.SetOutput(io.MultiWriter(os.Stderr, logs))
+
 	fmt.Print(banner)
 	log.Println("[Main] Initializing Cerberus Network Sentinel...")
 
@@ -31,6 +37,7 @@ func main() {
 		cfg.NetworkCIDR, cfg.DiscoveryInterval, cfg.VulnerabilityInterval, cfg.ServerPort, cfg.DBPath)
 
 	d := app.New(cfg)
+	d.SetLogs(logs)
 	if err := d.Start(context.Background()); err != nil {
 		log.Fatalf("[Main] Failed to start Cerberus daemon: %v", err)
 	}

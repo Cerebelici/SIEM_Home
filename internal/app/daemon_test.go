@@ -144,3 +144,34 @@ func TestDaemon_UsesOwnContext(t *testing.T) {
 		t.Fatalf("daemon.Stop error: %v", err)
 	}
 }
+
+func TestDaemon_ConfiguredSubnetIsTheDefaultTarget(t *testing.T) {
+	cfg := &config.Config{
+		NetworkCIDR:           "10.9.8.0/24",
+		AutoDetectNetwork:     false, // CERBERUS_SUBNET was set
+		DiscoveryInterval:     10 * time.Minute,
+		VulnerabilityInterval: 10 * time.Minute,
+		DBPath:                ":memory:",
+		IngestShards:          1,
+		DisableHTTPServer:     true,
+	}
+
+	d := app.New(cfg)
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("daemon.Start error: %v", err)
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = d.Stop(stopCtx)
+	}()
+
+	resp, err := d.GetSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSettings error: %v", err)
+	}
+	if resp.Settings.NetworkMode != "custom" || resp.Settings.EffectiveCIDR != "10.9.8.0/24" {
+		t.Errorf("expected the configured subnet as custom target, got mode %q cidr %q",
+			resp.Settings.NetworkMode, resp.Settings.EffectiveCIDR)
+	}
+}
