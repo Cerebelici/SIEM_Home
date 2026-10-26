@@ -30,6 +30,13 @@ type Config struct {
 	ImmediateScanDelay    time.Duration
 	DisableHTTPServer     bool
 	AutoDetectNetwork     bool
+
+	ActiveUsersHost  string
+	EnableTracking   bool
+	TrackingKey      string
+	AppVersion       string
+	ClientID         string
+	TrackingInterval time.Duration
 }
 
 // OSDataDir returns an OS-appropriate writable data directory for persistent app files (e.g. SQLite database).
@@ -94,6 +101,13 @@ func Load() *Config {
 		ImmediateScanDelay:    getEnvDuration("CERBERUS_IMMEDIATE_DELAY", 3*time.Second),
 		DisableHTTPServer:     getEnvBool("CERBERUS_DISABLE_HTTP", false),
 		AutoDetectNetwork:     autoDetect,
+
+		ActiveUsersHost:  getEnv("ACTIVE_USERS_HOST_ENDPOINT", ""),
+		EnableTracking:   getEnvBool("ENABLE_TRACKING", true),
+		TrackingKey:      getEnv("TRACKING_KEY", "67676767676767676767676767"),
+		AppVersion:       getEnv("CERBERUS_APP_VERSION", "0.1.0"),
+		ClientID:         getEnv("CERBERUS_CLIENT_ID", ""),
+		TrackingInterval: getEnvDuration("CERBERUS_TRACKING_INTERVAL", 24*time.Hour),
 	}
 
 	if cfg.NetworkCIDR == "" && !autoDetect {
