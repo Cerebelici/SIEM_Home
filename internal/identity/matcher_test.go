@@ -501,3 +501,59 @@ func TestMatcher_Determinism(t *testing.T) {
 		}
 	}
 }
+
+func TestMatcher_FirstMACForIPOnlyDeviceBinds(t *testing.T) {
+	// D was recorded without a MAC by an unprivileged sweep. The next sweep reads its MAC from
+	// the ARP table: the observation must bind to D (30 IPLease + 20 IPOnlyLease) and not
+	// create a second device for the same host.
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	dID := int64(300)
+	store := &fakeCandidateStore{
+		candidates: []Candidate{
+			{ID: dID, CurrentIP: "192.168.0.1", LastSeen: now.Add(-5 * time.Minute), IdentityConfidence: 0.3},
+		},
+	}
+
+	matcher := NewMatcher(store, DefaultWeights(), func() time.Time { return now })
+	dec, err := matcher.Resolve(context.Background(), Observation{
+		IP:         "192.168.0.1",
+		MAC:        "B0:A7:B9:22:8D:2C",
+		Vendor:     "TP-Link Systems",
+		ObservedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if dec.Action != ActionBind || dec.DeviceID == nil || *dec.DeviceID != dID {
+		t.Fatalf("expected bind to IP-only device %d, got %+v", dID, dec)
+	}
+}
+
+func TestMatcher_ScanWithoutMACBindsDeviceOverEmptyStubs(t *testing.T) {
+	// D holds .101 with a MAC. Two empty stubs from earlier unprivileged scans share the IP.
+	// A vulnerability scan observation (no MAC, a hostname and open ports) must bind to D:
+	// the stubs carry no evidence and must not make the match ambiguous.
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	dID := int64(5)
+	store := &fakeCandidateStore{
+		candidates: []Candidate{
+			{ID: 2, CurrentIP: "192.168.0.101", LastSeen: now.Add(-10 * time.Minute)},
+			{ID: dID, CurrentIP: "192.168.0.101", MAC: "80:0d:3f:4d:e9:68", LastSeen: now.Add(-1 * time.Minute)},
+			{ID: 9, CurrentIP: "192.168.0.101", LastSeen: now.Add(-2 * time.Minute)},
+		},
+	}
+
+	matcher := NewMatcher(store, DefaultWeights(), func() time.Time { return now })
+	dec, err := matcher.Resolve(context.Background(), Observation{
+		IP:         "192.168.0.101",
+		Hostname:   "galaxy-tab",
+		Ports:      []string{"tcp/8008/http"},
+		ObservedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("resolve failed: %v", err)
+	}
+	if dec.Action != ActionBind || dec.DeviceID == nil || *dec.DeviceID != dID {
+		t.Fatalf("expected bind to device %d, got %+v", dID, dec)
+	}
+}

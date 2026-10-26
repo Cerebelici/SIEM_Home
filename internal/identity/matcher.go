@@ -123,6 +123,13 @@ type scoredCandidate struct {
 	score float64
 }
 
+// isEmptyStub reports a device at ip that carries no identity evidence at all: no MAC,
+// hostname, services, fingerprints or agent. Unprivileged sweeps create such records.
+func isEmptyStub(c Candidate, ip string) bool {
+	return c.CurrentIP == ip && c.MAC == "" && c.Hostname == "" && len(c.Ports) == 0 &&
+		len(c.Fingerprints) == 0 && !c.Managed
+}
+
 func isProvisionalDiscoveryStub(c Candidate, obsIP string) bool {
 	return c.CurrentIP == obsIP &&
 		!c.Managed &&
@@ -149,6 +156,18 @@ func (m *Matcher) Resolve(ctx context.Context, o Observation) (Decision, error) 
 	candidates, err := m.store.GetCandidates(ctx, m.weights.CandidateWindow)
 	if err != nil {
 		return Decision{}, err
+	}
+
+	// A device with identity evidence that holds o.IP within its lease outranks empty stubs at
+	// the same IP: those are earlier sightings of the same host without a MAC. Letting them
+	// compete makes every match ambiguous and creates one more duplicate per scan. Binding
+	// merges them into the device (see storage ApplyDecision).
+	richHolderAtIP := false
+	for _, c := range candidates {
+		if c.CurrentIP == o.IP && !isEmptyStub(c, o.IP) && now.Sub(c.LastSeen) <= m.weights.LeaseWindow {
+			richHolderAtIP = true
+			break
+		}
 	}
 
 	// Tier 1a — Managed Agent Binding (deterministic, wins outright)
@@ -242,6 +261,9 @@ func (m *Matcher) Resolve(ctx context.Context, o Observation) (Decision, error) 
 			if skipProvisionalStub && isProvisionalDiscoveryStub(c, o.IP) {
 				continue
 			}
+			if richHolderAtIP && isEmptyStub(c, o.IP) {
+				continue
+			}
 
 			// VETO checks
 			// 1. Both UAA and MACs mismatch
@@ -295,10 +317,11 @@ func (m *Matcher) Resolve(ctx context.Context, o Observation) (Decision, error) 
 			if o.IP == c.CurrentIP {
 				if now.Sub(c.LastSeen) <= m.weights.LeaseWindow {
 					s += m.weights.IPLease
-					// When an unprivileged TCP scan (-sT) cannot read ARP MACs (normMAC == "")
-					// and observes an active IP within its lease window with no hostname conflict,
-					// award IPOnlyLease so it binds to the existing IP record instead of duplicating.
-					if normMAC == "" && normHost == "" && !hostConflicted {
+					// When one side has no MAC (an unprivileged TCP scan cannot read it, or the
+					// device was first recorded without it), MACs cannot confirm or refute the
+					// match. An active IP within its lease and no hostname conflict is then the
+					// best evidence: award IPOnlyLease so it binds instead of duplicating.
+					if (normMAC == "" || c.MAC == "") && !hostConflicted {
 						s += m.weights.IPOnlyLease
 					}
 				} else {
