@@ -58,7 +58,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.mod
           cache: false
 
       - name: Setup Node.js
@@ -82,7 +82,8 @@ jobs:
       - name: Install Wails CLI
         shell: bash
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          # Keep in sync with github.com/wailsapp/wails/v2 in go.mod.
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
 
       - name: Build Frontend (CerberusFront)
         shell: bash
@@ -92,8 +93,9 @@ jobs:
             npm ci || npm install
             npm run build
             cd ..
+            rm -rf desktop/frontend/dist
             mkdir -p desktop/frontend/dist
-            cp -r front/dist/* desktop/frontend/dist/
+            cp -R front/dist/. desktop/frontend/dist/
           elif [ -f "desktop/frontend/dist/index.html" ]; then
             echo "Pre-built frontend assets present in desktop/frontend/dist"
           fi

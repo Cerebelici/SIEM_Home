@@ -23,7 +23,10 @@ xattr -cr "${DMG_ROOT}/cerberus.app"
 codesign --force --deep --sign - "${DMG_ROOT}/cerberus.app"
 codesign --verify --deep --strict --verbose=2 "${DMG_ROOT}/cerberus.app"
 
-# 4. Create compressed DMG
+# 4. Add an Applications shortcut so the app can be installed by drag and drop
+ln -s /Applications "${DMG_ROOT}/Applications"
+
+# 5. Create compressed DMG
 rm -f "${OUTPUT_DMG}"
 hdiutil create -volname "Cerberus Sentinel" -srcfolder "${DMG_ROOT}" -ov -format UDZO "${OUTPUT_DMG}"
 rm -rf "${DMG_ROOT}"
