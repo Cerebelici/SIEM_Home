@@ -41,7 +41,7 @@ func formatDSN(path string, queryOnly bool) string {
 type Storage struct {
 	w                 *sql.DB
 	r                 *sql.DB
-	discoveryInterval time.Duration
+	discoveryInterval atomic.Int64 // time.Duration; changed at runtime from settings
 }
 
 // Tx wraps an active write transaction.
@@ -90,10 +90,10 @@ func New(dbPath string) (*Storage, error) {
 	r.SetMaxIdleConns(4)
 
 	s := &Storage{
-		w:                 w,
-		r:                 r,
-		discoveryInterval: 30 * time.Minute,
+		w: w,
+		r: r,
 	}
+	s.discoveryInterval.Store(int64(30 * time.Minute))
 
 	if err := s.runMigrations(); err != nil {
 		_ = s.Close()
@@ -106,7 +106,7 @@ func New(dbPath string) (*Storage, error) {
 // SetDiscoveryInterval configures the discovery interval used for ongoing period calculations.
 func (s *Storage) SetDiscoveryInterval(d time.Duration) {
 	if d > 0 {
-		s.discoveryInterval = d
+		s.discoveryInterval.Store(int64(d))
 	}
 }
 
@@ -516,6 +516,19 @@ func (s *Storage) UpdateScanLog(ctx context.Context, log *model.ScanLog) error {
 	return nil
 }
 
+// FailInterruptedScans marks scans still recorded as running as failed. Call it at startup:
+// a scan from an earlier process that ended without updating its record (crash, forced
+// quit) would otherwise stay "running" forever.
+func (s *Storage) FailInterruptedScans(ctx context.Context, message string) (int64, error) {
+	res, err := s.w.ExecContext(ctx,
+		`UPDATE scans SET status = 'failed', error_message = ?, completed_at = ? WHERE status = 'running';`,
+		message, time.Now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("failing interrupted scans: %w", err)
+	}
+	return res.RowsAffected()
+}
+
 // GetRecentScans returns the most recent scan logs.
 func (s *Storage) GetRecentScans(ctx context.Context, limit int) ([]model.ScanLog, error) {
 	if limit <= 0 {
@@ -829,7 +842,7 @@ func (s *Storage) GetTimeline(ctx context.Context, from, to time.Time, statusFil
 
 	// 5. Build timeline periods for each device
 	var timelineDevices []model.TimelineDevice
-	discoveryInterval := s.discoveryInterval
+	discoveryInterval := time.Duration(s.discoveryInterval.Load())
 	if discoveryInterval == 0 {
 		discoveryInterval = 30 * time.Minute
 	}

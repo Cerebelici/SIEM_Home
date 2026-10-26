@@ -683,3 +683,34 @@ func TestStorage_VendorPersistence(t *testing.T) {
 		t.Errorf("expected bound device vendor to be updated or preserved, got %q", dev2.Vendor)
 	}
 }
+
+func TestFailInterruptedScans(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	running, _ := store.CreateScanLog(ctx, &model.ScanLog{ScanType: "discovery", Status: "running", TargetSpec: "10.0.0.0/24"})
+	done, _ := store.CreateScanLog(ctx, &model.ScanLog{ScanType: "discovery", Status: "running", TargetSpec: "10.0.0.0/24"})
+	done.Status = "completed"
+	if err := store.UpdateScanLog(ctx, done); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := store.FailInterruptedScans(ctx, "scan interrupted")
+	if err != nil || n != 1 {
+		t.Fatalf("FailInterruptedScans() = %d, %v; want 1", n, err)
+	}
+	scans, _ := store.GetRecentScans(ctx, 10)
+	for _, s := range scans {
+		switch s.ID {
+		case running.ID:
+			if s.Status != "failed" || s.ErrorMessage != "scan interrupted" || s.CompletedAt == nil {
+				t.Errorf("interrupted scan not closed: %+v", s)
+			}
+		case done.ID:
+			if s.Status != "completed" {
+				t.Errorf("completed scan changed: %+v", s)
+			}
+		}
+	}
+}

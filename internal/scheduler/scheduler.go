@@ -2,8 +2,10 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +18,9 @@ import (
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/storage"
 )
+
+// ErrScanInProgress is returned when a scan of the requested type is already running or queued.
+var ErrScanInProgress = errors.New("scan already in progress")
 
 // Scheduler manages independent concurrent goroutines for network discovery and vulnerability analysis.
 type Scheduler struct {
@@ -33,13 +38,20 @@ type Scheduler struct {
 
 	discoveryRunning atomic.Bool
 	vulnRunning      atomic.Bool
+	discoveryQueued  atomic.Bool
+	vulnQueued       atomic.Bool
+	immediateActive  atomic.Int32
 
-	discoveryNextRun time.Time
-	vulnNextRun      time.Time
-	mu               sync.RWMutex
+	discoveryNextRun  time.Time
+	vulnNextRun       time.Time
+	discoveryInterval time.Duration
+	vulnInterval      time.Duration
+	mu                sync.RWMutex
 
 	manualDiscoveryCh chan chan error
 	manualVulnCh      chan chan error
+	discoveryResetCh  chan struct{}
+	vulnResetCh       chan struct{}
 }
 
 // New creates a new Scheduler.
@@ -53,6 +65,10 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 		immediateVulnCh:   make(chan string, 100),
 		manualDiscoveryCh: make(chan chan error, 5),
 		manualVulnCh:      make(chan chan error, 5),
+		discoveryResetCh:  make(chan struct{}, 1),
+		vulnResetCh:       make(chan struct{}, 1),
+		discoveryInterval: cfg.DiscoveryInterval,
+		vulnInterval:      cfg.VulnerabilityInterval,
 	}
 
 	// Wire discovery service to push new devices to immediateVulnCh
@@ -60,6 +76,53 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 	s.storage.SetDiscoveryInterval(cfg.DiscoveryInterval)
 
 	return s
+}
+
+// SetLocalNetworkCheck sets the check that runs before every discovery sweep.
+func (s *Scheduler) SetLocalNetworkCheck(check discovery.LocalNetworkCheck) {
+	s.discoveryService.SetLocalNetworkCheck(check)
+}
+
+// SetDiscoveryTarget changes the subnet (CIDR) or address that discovery sweeps scan.
+func (s *Scheduler) SetDiscoveryTarget(target string) {
+	s.discoveryService.SetTarget(target)
+}
+
+// DiscoveryTarget returns the subnet (CIDR) or address that discovery sweeps scan.
+func (s *Scheduler) DiscoveryTarget() string {
+	return s.discoveryService.Target()
+}
+
+// SetIntervals changes how often the periodic scans run. A worker whose interval changed
+// restarts its timer at once, so its next run is one new interval from now.
+func (s *Scheduler) SetIntervals(discoveryEvery, vulnEvery time.Duration) {
+	var changed []chan struct{}
+	s.mu.Lock()
+	if discoveryEvery > 0 && discoveryEvery != s.discoveryInterval {
+		s.discoveryInterval = discoveryEvery
+		changed = append(changed, s.discoveryResetCh)
+	}
+	if vulnEvery > 0 && vulnEvery != s.vulnInterval {
+		s.vulnInterval = vulnEvery
+		changed = append(changed, s.vulnResetCh)
+	}
+	disc := s.discoveryInterval
+	s.mu.Unlock()
+
+	s.storage.SetDiscoveryInterval(disc)
+	for _, ch := range changed {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// Intervals returns the current periodic discovery and vulnerability scan intervals.
+func (s *Scheduler) Intervals() (discoveryEvery, vulnEvery time.Duration) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.discoveryInterval, s.vulnInterval
 }
 
 // SetPostureService assigns or overrides the posture evaluation service.
@@ -84,8 +147,9 @@ func (s *Scheduler) EnqueueImmediateScan(ip string) {
 // 4. Daily Retention Worker (90-day retention)
 // 5. Hourly Posture Snapshot Worker
 func (s *Scheduler) Start(ctx context.Context) {
+	discEvery, vulnEvery := s.Intervals()
 	log.Printf("[Scheduler] Starting background engines (Discovery: %v, Vulnerability: %v)",
-		s.cfg.DiscoveryInterval, s.cfg.VulnerabilityInterval)
+		discEvery, vulnEvery)
 
 	s.wg.Add(5)
 	go s.runDiscoveryWorker(ctx)
@@ -107,11 +171,12 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) runDiscoveryWorker(ctx context.Context) {
 	defer s.wg.Done()
 
-	ticker := time.NewTicker(s.cfg.DiscoveryInterval)
+	interval, _ := s.Intervals()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// Perform initial discovery scan immediately on startup
-	s.setNextDiscoveryRun(time.Now().Add(s.cfg.DiscoveryInterval))
+	s.setNextDiscoveryRun(time.Now().Add(interval))
 	s.executeDiscovery(ctx)
 
 	for {
@@ -120,12 +185,18 @@ func (s *Scheduler) runDiscoveryWorker(ctx context.Context) {
 			log.Println("[Discovery Worker] Shutting down.")
 			return
 
+		case <-s.discoveryResetCh:
+			interval, _ = s.Intervals()
+			ticker.Reset(interval)
+			s.setNextDiscoveryRun(time.Now().Add(interval))
+
 		case <-ticker.C:
-			s.setNextDiscoveryRun(time.Now().Add(s.cfg.DiscoveryInterval))
+			s.setNextDiscoveryRun(time.Now().Add(interval))
 			s.executeDiscovery(ctx)
 
 		case respCh := <-s.manualDiscoveryCh:
 			err := s.executeDiscovery(ctx)
+			s.discoveryQueued.Store(false)
 			respCh <- err
 		}
 	}
@@ -148,10 +219,11 @@ func (s *Scheduler) executeDiscovery(ctx context.Context) error {
 func (s *Scheduler) runPeriodicVulnWorker(ctx context.Context) {
 	defer s.wg.Done()
 
-	ticker := time.NewTicker(s.cfg.VulnerabilityInterval)
+	_, interval := s.Intervals()
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	s.setNextVulnRun(time.Now().Add(s.cfg.VulnerabilityInterval))
+	s.setNextVulnRun(time.Now().Add(interval))
 
 	for {
 		select {
@@ -159,12 +231,18 @@ func (s *Scheduler) runPeriodicVulnWorker(ctx context.Context) {
 			log.Println("[Vuln Worker] Shutting down periodic scanner.")
 			return
 
+		case <-s.vulnResetCh:
+			_, interval = s.Intervals()
+			ticker.Reset(interval)
+			s.setNextVulnRun(time.Now().Add(interval))
+
 		case <-ticker.C:
-			s.setNextVulnRun(time.Now().Add(s.cfg.VulnerabilityInterval))
+			s.setNextVulnRun(time.Now().Add(interval))
 			s.executePeriodicVulnScan(ctx)
 
 		case respCh := <-s.manualVulnCh:
 			err := s.executePeriodicVulnScan(ctx)
+			s.vulnQueued.Store(false)
 			respCh <- err
 		}
 	}
@@ -216,8 +294,10 @@ func (s *Scheduler) runImmediateVulnWorker(ctx context.Context) {
 				continue
 			}
 
-			log.Printf("[Immediate Vuln Worker] 🚀 Launching immediate scan on newly discovered host %s", ip)
+			log.Printf("[Immediate Vuln Worker] Launching immediate scan on newly discovered host %s", ip)
 			func(targetIP string) {
+				s.immediateActive.Add(1)
+				defer s.immediateActive.Add(-1)
 				defer s.activeTargets.Delete(targetIP)
 				// Allow newly booted endpoints a short window to finish binding ports
 				if s.cfg != nil && s.cfg.ImmediateScanDelay > 0 {
@@ -259,7 +339,10 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 	}
 
 	start := time.Now()
-	targetSpec := fmt.Sprintf("%v", targets)
+	targetSpec := strings.Join(targets, ", ")
+	// Results and the final scan state are saved even when ctx is cancelled during
+	// shutdown, so no scan stays "running" forever.
+	persistCtx := context.WithoutCancel(ctx)
 
 	scanLog, err := s.storage.CreateScanLog(ctx, &model.ScanLog{
 		ScanType:   scanType,
@@ -274,17 +357,31 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 	duration := time.Since(start).Milliseconds()
 
 	if scanErr != nil {
-		log.Printf("[%s Scan] Scan error: %v", scanType, scanErr)
+		message := scanner.DescribeScanError(ctx, scanErr)
+		log.Printf("[%s Scan] Scan error: %s", scanType, message)
 		if scanLog != nil {
 			scanLog.Status = "failed"
-			scanLog.ErrorMessage = scanErr.Error()
+			scanLog.ErrorMessage = message
 			scanLog.DurationMs = duration
-			_ = s.storage.UpdateScanLog(ctx, scanLog)
+			_ = s.storage.UpdateScanLog(persistCtx, scanLog)
 		}
 		return scanErr
 	}
 
 	isUnprivileged := (s.scanner.Capabilities() != nil && s.scanner.Capabilities().EffectiveMode == "unprivileged") || s.cfg.ForceUnprivileged
+
+	discovery.ResolveAll(persistCtx, len(results),
+		func(i int) (string, string, string, string) {
+			return results[i].IP, results[i].Hostname, results[i].Vendor, results[i].MAC
+		},
+		func(i int, host, vendor string) {
+			if host != "" {
+				results[i].Hostname = host
+			}
+			if vendor != "" {
+				results[i].Vendor = vendor
+			}
+		})
 
 	totalVulnsFound := 0
 	for _, res := range results {
@@ -301,14 +398,6 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 			continue
 		}
 
-		resolvedHost, resolvedVendor := discovery.ResolveHostnameAndVendor(ctx, res.IP, res.Hostname, res.Vendor, res.MAC)
-		if resolvedHost != "" {
-			res.Hostname = resolvedHost
-		}
-		if resolvedVendor != "" {
-			res.Vendor = resolvedVendor
-		}
-
 		portProfile, _ := identity.PortProfile(res.Services)
 		obs := identity.Observation{
 			IP:           res.IP,
@@ -319,13 +408,14 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 			Fingerprints: res.Fingerprints,
 			ObservedAt:   start,
 		}
-		dec, err := s.matcher.Resolve(ctx, obs)
+		dec, err := s.matcher.Resolve(persistCtx, obs)
 		if err != nil {
 			log.Printf("[%s Scan] Error resolving identity for %s: %v", scanType, res.IP, err)
 			continue
 		}
 
-		err = s.storage.WithTx(ctx, func(tx *storage.Tx) error {
+		err = s.storage.WithTx(persistCtx, func(tx *storage.Tx) error {
+			ctx := persistCtx
 			dev, err := tx.ApplyDecision(ctx, dec, obs)
 			if err != nil {
 				return fmt.Errorf("applying decision for %s: %w", res.IP, err)
@@ -392,11 +482,11 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 		scanLog.HostsFound = len(results)
 		scanLog.VulnsFound = totalVulnsFound
 		scanLog.DurationMs = duration
-		_ = s.storage.UpdateScanLog(ctx, scanLog)
+		_ = s.storage.UpdateScanLog(persistCtx, scanLog)
 	}
 
 	if s.postureService != nil {
-		if _, snapErr := s.postureService.Snapshot(ctx); snapErr != nil {
+		if _, snapErr := s.postureService.Snapshot(persistCtx); snapErr != nil {
 			log.Printf("[%s Scan] Error creating posture snapshot: %v", scanType, snapErr)
 		}
 	}
@@ -407,6 +497,41 @@ func (s *Scheduler) scanTargets(ctx context.Context, targets []string, scanType 
 // -------------------------------------------------------------
 // Control & Status Methods
 // -------------------------------------------------------------
+
+// RequestDiscovery queues an on-demand discovery scan and returns at once. It returns
+// ErrScanInProgress when a discovery scan is already running or queued.
+func (s *Scheduler) RequestDiscovery() error {
+	if s.discoveryRunning.Load() || !s.discoveryQueued.CompareAndSwap(false, true) {
+		return ErrScanInProgress
+	}
+	select {
+	case s.manualDiscoveryCh <- make(chan error, 1):
+		return nil
+	default:
+		s.discoveryQueued.Store(false)
+		return ErrScanInProgress
+	}
+}
+
+// RequestVulnerabilityScan queues an on-demand vulnerability scan of all active devices and
+// returns at once. It returns ErrScanInProgress when a vulnerability scan is already
+// running or queued.
+func (s *Scheduler) RequestVulnerabilityScan() error {
+	if s.isVulnScanActive() || !s.vulnQueued.CompareAndSwap(false, true) {
+		return ErrScanInProgress
+	}
+	select {
+	case s.manualVulnCh <- make(chan error, 1):
+		return nil
+	default:
+		s.vulnQueued.Store(false)
+		return ErrScanInProgress
+	}
+}
+
+func (s *Scheduler) isVulnScanActive() bool {
+	return s.vulnRunning.Load() || s.immediateActive.Load() > 0
+}
 
 // TriggerDiscovery requests an on-demand discovery scan.
 func (s *Scheduler) TriggerDiscovery(ctx context.Context) error {
@@ -471,7 +596,12 @@ func (s *Scheduler) GetNextRuns() (discTime, vulnTime *time.Time, discRunning, v
 		vt = &copyVt
 	}
 
-	return dt, vt, s.discoveryRunning.Load(), s.vulnRunning.Load()
+	// Queued manual requests count as running so the UI never shows "idle" between the
+	// request and the worker picking it up. Immediate audits of new hosts are vulnerability
+	// scans too.
+	discRunning = s.discoveryRunning.Load() || s.discoveryQueued.Load()
+	vulnRunning = s.isVulnScanActive() || s.vulnQueued.Load()
+	return dt, vt, discRunning, vulnRunning
 }
 
 // -------------------------------------------------------------

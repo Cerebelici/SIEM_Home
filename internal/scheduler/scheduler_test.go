@@ -2,6 +2,7 @@ package scheduler_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gr0gu/cerberus/internal/config"
+	"github.com/gr0gu/cerberus/internal/model"
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/scheduler"
 	"github.com/gr0gu/cerberus/internal/storage"
@@ -154,12 +156,15 @@ func TestScheduler_VulnerabilityReconciliation(t *testing.T) {
 
 	// 1. First immediate scan detects vuln
 	sch.EnqueueImmediateScan("172.28.0.10")
-	time.Sleep(200 * time.Millisecond)
-
-	dev, err := store.GetDeviceByIP(ctx, "172.28.0.10")
-	if err != nil || dev == nil {
-		t.Fatalf("expected device created: %v", err)
-	}
+	var dev *model.Device
+	waitFor(t, "device created by scan 1", func() bool {
+		dev, err = store.GetDeviceByIP(ctx, "172.28.0.10")
+		if err != nil || dev == nil {
+			return false
+		}
+		isVuln, _, _, _ := store.GetDeviceSecurityPosture(ctx, dev.ID)
+		return isVuln
+	})
 
 	isVuln, count, _, err := store.GetDeviceSecurityPosture(ctx, dev.ID)
 	if err != nil {
@@ -171,7 +176,10 @@ func TestScheduler_VulnerabilityReconciliation(t *testing.T) {
 
 	// 2. Second scan resolves vuln
 	sch.EnqueueImmediateScan("172.28.0.10")
-	time.Sleep(200 * time.Millisecond)
+	waitFor(t, "vulnerability resolved by scan 2", func() bool {
+		isVuln, _, _, _ := store.GetDeviceSecurityPosture(ctx, dev.ID)
+		return !isVuln
+	})
 
 	isVuln, count, _, err = store.GetDeviceSecurityPosture(ctx, dev.ID)
 	if err != nil {
@@ -228,5 +236,115 @@ func TestScheduler_Triggers(t *testing.T) {
 	}
 	if err := sch.TriggerVulnerabilityScan(ctx); err != nil {
 		t.Fatalf("trigger vuln scan error: %v", err)
+	}
+}
+
+// waitFor polls cond until it is true or fails the test after a few seconds. Scans run on
+// worker goroutines, so a fixed sleep is either slow or flaky.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// gatedRunner blocks every nmap call until release is closed, so a scan stays running.
+type gatedRunner struct {
+	release chan struct{}
+}
+
+func (g *gatedRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return []byte(`<nmaprun scanner="nmap"><runstats><finished exit="success"/></runstats></nmaprun>`), nil
+}
+
+func newSchedulerForTest(t *testing.T, runner scanner.CommandRunner) (*scheduler.Scheduler, *storage.Storage) {
+	t.Helper()
+	store, err := storage.New(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("storage init error: %v", err)
+	}
+	cfg := &config.Config{
+		NetworkCIDR:           "172.28.0.0/24",
+		DiscoveryInterval:     10 * time.Minute,
+		VulnerabilityInterval: 10 * time.Minute,
+		ScanTimeout:           5 * time.Second,
+		NmapPath:              "nmap",
+	}
+	sch := scheduler.New(cfg, store, scanner.NewWithRunner(cfg, runner))
+	ctx, cancel := context.WithCancel(context.Background())
+	sch.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		sch.Stop()
+		store.Close()
+	})
+	return sch, store
+}
+
+func TestScheduler_RequestDiscoveryRejectsWhileRunning(t *testing.T) {
+	runner := &gatedRunner{release: make(chan struct{})}
+	sch, _ := newSchedulerForTest(t, runner)
+
+	// The startup sweep blocks in the runner.
+	waitFor(t, "startup discovery running", func() bool {
+		_, _, running, _ := sch.GetNextRuns()
+		return running
+	})
+	if err := sch.RequestDiscovery(); !errors.Is(err, scheduler.ErrScanInProgress) {
+		t.Fatalf("expected ErrScanInProgress while a sweep runs, got %v", err)
+	}
+
+	close(runner.release)
+	waitFor(t, "startup discovery finished", func() bool {
+		_, _, running, _ := sch.GetNextRuns()
+		return !running
+	})
+
+	if err := sch.RequestDiscovery(); err != nil {
+		t.Fatalf("expected the request to be accepted when idle, got %v", err)
+	}
+	if err := sch.RequestDiscovery(); !errors.Is(err, scheduler.ErrScanInProgress) {
+		t.Fatalf("expected ErrScanInProgress for a second request, got %v", err)
+	}
+	waitFor(t, "manual discovery finished", func() bool {
+		_, _, running, _ := sch.GetNextRuns()
+		return !running
+	})
+	if err := sch.RequestVulnerabilityScan(); err != nil {
+		t.Fatalf("expected the vulnerability request to be accepted, got %v", err)
+	}
+}
+
+func TestScheduler_SetIntervalsReschedulesRunningWorkers(t *testing.T) {
+	sch, _ := newSchedulerForTest(t, &dummyRunner{})
+
+	sch.SetIntervals(2*time.Hour, 3*time.Hour)
+	waitFor(t, "workers to apply the new intervals", func() bool {
+		disc, vuln, _, _ := sch.GetNextRuns()
+		return disc != nil && vuln != nil &&
+			time.Until(*disc) > 110*time.Minute && time.Until(*vuln) > 170*time.Minute
+	})
+	if d, v := sch.Intervals(); d != 2*time.Hour || v != 3*time.Hour {
+		t.Errorf("Intervals() = %v, %v; want 2h, 3h", d, v)
+	}
+
+	// Only the changed interval restarts its timer.
+	_, vulnBefore, _, _ := sch.GetNextRuns()
+	sch.SetIntervals(4*time.Hour, 3*time.Hour)
+	waitFor(t, "discovery to apply the new interval", func() bool {
+		disc, _, _, _ := sch.GetNextRuns()
+		return disc != nil && time.Until(*disc) > 230*time.Minute
+	})
+	if _, vulnAfter, _, _ := sch.GetNextRuns(); !vulnAfter.Equal(*vulnBefore) {
+		t.Errorf("vulnerability run moved from %v to %v although its interval did not change", vulnBefore, vulnAfter)
 	}
 }
