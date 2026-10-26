@@ -865,8 +865,10 @@ paths:
       summary: Trigger on-demand subnet discovery
       description: >
         Asynchronously initiates an immediate host discovery sweep across the configured
-        network subnet (`CERBERUS_SUBNET`). Returns immediately with HTTP 202 Accepted.
-        Newly detected endpoints are automatically queued for immediate vulnerability auditing.
+        network subnet (`CERBERUS_SUBNET`). Returns immediately with HTTP 202 Accepted, or
+        409 when a discovery scan is already running or queued. Newly detected endpoints are
+        automatically queued for immediate vulnerability auditing. Follow the outcome through
+        `GET /api/status` and `GET /api/scans`.
       tags:
         - scans
       operationId: triggerDiscoveryScan
@@ -880,6 +882,27 @@ paths:
               example:
                 message: Discovery scan initiated in background
                 status: running
+                scan_type: discovery
+        '409':
+          description: A discovery scan is already running or queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: A discovery scan is already in progress
+                status: conflict
+                scan_type: discovery
+        '503':
+          description: No scan scheduler is available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: scan scheduler is not available
+                status: unavailable
+                scan_type: discovery
         '500':
           $ref: '#/components/responses/InternalServerError'
       x-codeSamples:
@@ -908,7 +931,8 @@ paths:
       description: >
         Asynchronously initiates an immediate vulnerability assessment sweep across
         all active endpoints currently registered in the database. Returns immediately
-        with HTTP 202 Accepted.
+        with HTTP 202 Accepted, or 409 when a vulnerability scan (including the immediate
+        audit of a new host) is already running or queued.
       tags:
         - scans
       operationId: triggerVulnerabilityScan
@@ -922,6 +946,27 @@ paths:
               example:
                 message: Vulnerability audit initiated in background
                 status: running
+                scan_type: vulnerability
+        '409':
+          description: A vulnerability scan is already running or queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: A vulnerability scan is already in progress
+                status: conflict
+                scan_type: vulnerability
+        '503':
+          description: No scan scheduler is available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanTriggerConflict'
+              example:
+                error: scan scheduler is not available
+                status: unavailable
+                scan_type: vulnerability
         '500':
           $ref: '#/components/responses/InternalServerError'
       x-codeSamples:
@@ -943,6 +988,74 @@ paths:
             import requests
             r = requests.post('http://localhost:8080/api/scans/vulnerability/trigger')
             print(r.json())
+
+  /api/logs:
+    get:
+      summary: Recent daemon log lines
+      description: >
+        Returns the last lines of the daemon log, oldest first. The desktop app streams new
+        lines as `cerberus:log` events.
+      tags:
+        - system
+      operationId: getLogs
+      responses:
+        '200':
+          description: Daemon log lines.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  logs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LogEntry'
+
+  /api/settings:
+    get:
+      summary: Current settings, network interfaces and scanner capabilities
+      tags:
+        - system
+      operationId: getSettings
+      responses:
+        '200':
+          description: Active settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '503':
+          description: Settings are not available (no daemon wired).
+    put:
+      summary: Change settings
+      description: >
+        Saves the settings and applies them at once: scan target, ports, intervals and
+        privilege mode. Starts a discovery sweep of the (possibly new) target. Requires a
+        loopback caller or `X-API-Key`.
+      tags:
+        - system
+      operationId: updateSettings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppSettings'
+      responses:
+        '200':
+          description: Saved settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '400':
+          description: Invalid settings, for example a mode that does not resolve to a subnet.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          description: Settings are not available (no daemon wired).
 
   /api/export/json:
     get:
@@ -1982,6 +2095,97 @@ components:
           type: string
           description: Execution state.
           example: running
+        scan_type:
+          type: string
+          enum: [discovery, vulnerability]
+
+    ScanTriggerConflict:
+      type: object
+      required:
+        - error
+        - status
+        - scan_type
+      properties:
+        error:
+          type: string
+          example: A discovery scan is already in progress
+        status:
+          type: string
+          enum: [conflict, unavailable]
+        scan_type:
+          type: string
+          enum: [discovery, vulnerability]
+
+    LogEntry:
+      type: object
+      required: [seq, timestamp, level, source, message]
+      properties:
+        seq:
+          type: integer
+          description: Increasing line number; it starts again at 1 when the daemon restarts.
+          example: 42
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [ERROR, WARN, INFO]
+        source:
+          type: string
+          description: Component that wrote the line (the text in the first [brackets]).
+          example: Discovery
+        message:
+          type: string
+          example: Completed. Discovered 5 live hosts (0 new) in 34000ms
+
+    AppSettings:
+      type: object
+      properties:
+        network_mode:
+          type: string
+          enum: [auto, interface, custom]
+        selected_interface:
+          type: string
+        custom_network_cidr:
+          type: string
+          example: 192.168.1.0/24
+        effective_cidr:
+          type: string
+          readOnly: true
+        effective_exclude_ip:
+          type: string
+          readOnly: true
+        scan_ports:
+          type: string
+          description: Empty for the top 1000 ports, or an nmap port list such as `1-65535`.
+        discovery_interval_sec:
+          type: integer
+          minimum: 30
+        vuln_interval_sec:
+          type: integer
+          minimum: 60
+        unprivileged_mode:
+          type: boolean
+        nmap_path:
+          type: string
+
+    SettingsResponse:
+      type: object
+      properties:
+        settings:
+          $ref: '#/components/schemas/AppSettings'
+        interfaces:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              ipv4: {type: string}
+              cidr: {type: string}
+              mac: {type: string}
+              is_default: {type: boolean}
+        capabilities:
+          type: object
 
     ExportData:
       type: object
@@ -2605,6 +2809,14 @@ components:
             $ref: '#/components/schemas/Error'
           example:
             error: device 99 not found
+    Unauthorized:
+      description: Changes need a loopback caller or a valid `X-API-Key` header.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: 'unauthorized: loopback or API key required'
     InternalServerError:
       description: The server encountered an unexpected error processing the request.
       content:

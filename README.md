@@ -36,7 +36,8 @@ In modern networks, a device's IP address can change whenever it reconnects (via
 
 ### Built-In Safeguards Against Duplicate Devices
 - **Ignoring Ghost Hosts in Unprivileged Mode (`-Pn`)**: When running without raw-socket privileges (`CERBERUS_UNPRIVILEGED=true`), Nmap uses `-Pn`, which reports every scanned IP as "online" even if no device is actually listening there. Cerberus filters out any `-Pn` result that has both zero open ports and no MAC address *before* running identity matching, so offline or old mock IPs (such as `172.28.0.50` from initial seed data) never create phantom device records.
-- **Handling Scans Without MAC Addresses**: When Nmap scans across a network where MAC addresses aren't visible (such as unprivileged TCP scans or local container interfaces), Cerberus keeps linking the scan result to the active device holding that IP lease (`IPLease + IPOnlyLease`) rather than creating a new device on every scan.
+- **Handling Scans Without MAC Addresses**: When Nmap scans across a network where MAC addresses aren't visible (such as unprivileged TCP scans or local container interfaces), Cerberus keeps linking the scan result to the active device holding that IP lease (`IPLease + IPOnlyLease`) rather than creating a new device on every scan. The same applies when a device recorded without a MAC is seen with one for the first time. Empty IP-only records never compete with a device that holds the same IP lease; binding merges them into it.
+- **MAC Addresses from the ARP Table (macOS)**: macOS always scans with unprivileged TCP connect, which cannot read MAC addresses and misses hosts that drop every probed port (phones, many IoT devices). After each sweep, Cerberus reads the ARP entries the OS confirmed during the sweep (`arp -anx`, entries with a running timer only): it fills the MAC of every found host and adds hosts that answered ARP but no TCP probe. Vendors come from the `nmap-mac-prefixes` database installed with nmap.
 - **One Active Device Per IP**: Cerberus deduplicates target IPs before every scan and automatically marks any older device record at the same IP as `down` when a new device takes over that address, preventing duplicate entries from accumulating.
 
 ---
@@ -222,6 +223,13 @@ All responses are formatted in JSON:
 - `POST /api/devices/{id}/split`: Split an address lease into an independent record.
 - `GET /api/devices/{id}/identity`: Review deterministic matching rationale and decision audit logs.
 
+### Scans, Settings & Logs
+- `GET /api/status`: Live counters, next scheduled runs and `is_discovery_running` / `is_vuln_running` (queued manual scans and the immediate audit of new hosts count as running).
+- `GET /api/scans?limit=N`: Scan history, newest first. Scans that a previous process left unfinished are recorded as `failed` with an "interrupted" message at startup.
+- `POST /api/scans/discovery/trigger`, `POST /api/scans/vulnerability/trigger`: Queue a manual scan. `202` `{"message","status":"running","scan_type"}` when queued, `409` `{"error","status":"conflict","scan_type"}` when a scan of that type is already running or queued, `503` when no scheduler is available. The desktop IPC methods `TriggerDiscovery` / `TriggerVulnerabilityScan` return the same bodies.
+- `GET /api/settings`, `PUT /api/settings`: Read and change the scan target, ports, intervals and privilege mode. Changes apply at once, without a restart (`PUT` needs loopback or `X-API-Key`).
+- `GET /api/logs`: Recent daemon log lines `{seq, timestamp, level, source, message}`. The desktop app also streams new lines as `cerberus:log` events.
+
 ### Vulnerabilities & Timeline
 - `GET /api/services`: List detected network services across all hosts.
 - `GET /api/vulnerabilities`: List detected CVE vulnerabilities (filter: `?severity=CRITICAL`).
@@ -250,7 +258,16 @@ make build-headless
 ```
 
 ### Desktop Application (Wails v2)
-Requires `libgtk-3-dev`, `libwebkit2gtk-4.1-dev`, and Wails CLI (`go install github.com/wailsapp/wails/v2/cmd/wails@latest`):
+Requires the Wails CLI (`go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0`) and nmap on the machine that runs the app.
+
+macOS: initialize the `front` submodule, then build the universal app and `Cerberus-macOS-universal.dmg` in the repository root:
+```bash
+git submodule update --init --recursive
+./build-macos.sh
+```
+On the first scan, macOS asks whether Cerberus Sentinel may find devices on the local network. Until you allow it, macOS blocks every connection to the LAN; the scan waits up to a minute for the answer and then fails with a message instead of reporting an empty network. You can change the answer later in System Settings > Privacy & Security > Local Network.
+
+Linux (requires `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`):
 ```bash
 make build-desktop
 ```
