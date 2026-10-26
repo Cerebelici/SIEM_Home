@@ -30,6 +30,10 @@ export function GetDevices(arg1) {
   return window['go']['main']['Bridge']['GetDevices'](arg1);
 }
 
+export function GetLogs() {
+  return window['go']['main']['Bridge']['GetLogs']();
+}
+
 export function GetPosture() {
   return window['go']['main']['Bridge']['GetPosture']();
 }

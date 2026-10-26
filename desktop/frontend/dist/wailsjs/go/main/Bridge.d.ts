@@ -17,6 +17,8 @@ export function GetDeviceByID(arg1:number):Promise<model.Device>;
 
 export function GetDevices(arg1:string):Promise<Record<string, any>>;
 
+export function GetLogs():Promise<Record<string, any>>;
+
 export function GetPosture():Promise<model.PostureReport>;
 
 export function GetScans(arg1:number):Promise<Record<string, any>>;
