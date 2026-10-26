@@ -15,6 +15,7 @@ import (
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/scheduler"
 	"github.com/gr0gu/cerberus/internal/storage"
+	"github.com/gr0gu/cerberus/internal/tracker"
 )
 
 // Daemon manages the unified lifecycle of Cerberus Sentinel workers, storage, and HTTP server.
@@ -189,3 +190,14 @@ func (d *Daemon) Port() int {
 	}
 	return d.cfg.ServerPort
 }
+
+// Tracker returns the active users tracker instance managed by the scheduler.
+func (d *Daemon) Tracker() *tracker.Tracker {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.sched != nil {
+		return d.sched.Tracker()
+	}
+	return nil
+}
+
