@@ -9,11 +9,11 @@ import (
 )
 
 type mockPostureStore struct {
-	devices        []model.Device
-	vulns          map[int64][]model.Vulnerability
-	incidents      map[string]int
-	savedSnapshots []*model.PostureSnapshot
-	history        []model.PostureSnapshot
+	devices         []model.Device
+	vulns           map[int64][]model.Vulnerability
+	incidents       map[string]int
+	savedSnapshots  []*model.PostureSnapshot
+	history         []model.PostureSnapshot
 	getDevicesCalls int
 }
 

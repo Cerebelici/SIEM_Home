@@ -296,4 +296,3 @@ func TestAPI_Timeline(t *testing.T) {
 		t.Errorf("unexpected period: %+v", period)
 	}
 }
-

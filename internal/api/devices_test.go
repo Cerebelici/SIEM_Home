@@ -322,4 +322,3 @@ func TestAPI_ClearAllDevices_And_DeleteEndpoints(t *testing.T) {
 	}
 	_ = scan
 }
-

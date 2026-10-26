@@ -352,6 +352,3 @@ func TestStorage_AuxiliaryQueries(t *testing.T) {
 		t.Errorf("expected 0 purged, got %d, %d", delRecs, delScans)
 	}
 }
-
-
-

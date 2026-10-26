@@ -299,4 +299,3 @@ type SettingsResponse struct {
 	Interfaces   []NetworkInterfaceInfo `json:"interfaces"`
 	Capabilities *Capabilities          `json:"capabilities"`
 }
-

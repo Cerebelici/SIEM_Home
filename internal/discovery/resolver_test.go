@@ -94,4 +94,3 @@ func TestResolveHostnameAndVendorInference(t *testing.T) {
 		t.Errorf("expected vendor MikroTik, got %s", vendor2)
 	}
 }
-

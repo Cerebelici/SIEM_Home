@@ -208,12 +208,12 @@ func (s *Storage) GetIncidents(ctx context.Context, filter model.IncidentFilter)
 	var incidents []model.Incident
 	for rows.Next() {
 		var (
-			inc         model.Incident
-			devID       sql.NullInt64
-			pidRoot     sql.NullInt64
-			evRaw       string
-			tactic      sql.NullString
-			technique   sql.NullString
+			inc       model.Incident
+			devID     sql.NullInt64
+			pidRoot   sql.NullInt64
+			evRaw     string
+			tactic    sql.NullString
+			technique sql.NullString
 		)
 
 		err := rows.Scan(
