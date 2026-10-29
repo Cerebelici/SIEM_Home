@@ -15,6 +15,7 @@ import (
 	"github.com/gr0gu/cerberus/internal/posture"
 	"github.com/gr0gu/cerberus/internal/scanner"
 	"github.com/gr0gu/cerberus/internal/storage"
+	"github.com/gr0gu/cerberus/internal/tracker"
 )
 
 // Scheduler manages independent concurrent goroutines for network discovery and vulnerability analysis.
@@ -25,6 +26,7 @@ type Scheduler struct {
 	discoveryService *discovery.Service
 	matcher          *identity.Matcher
 	postureService   *posture.Service
+	tracker          *tracker.Tracker
 
 	// Concurrency and scheduling
 	wg              sync.WaitGroup
@@ -50,6 +52,7 @@ func New(cfg *config.Config, store *storage.Storage, scn *scanner.Scanner) *Sche
 		scanner:           scn,
 		matcher:           identity.NewMatcher(store, identity.DefaultWeights(), time.Now),
 		postureService:    posture.NewService(store, posture.DefaultPolicy),
+		tracker:           tracker.New(cfg, store),
 		immediateVulnCh:   make(chan string, 100),
 		manualDiscoveryCh: make(chan chan error, 5),
 		manualVulnCh:      make(chan chan error, 5),
@@ -83,16 +86,18 @@ func (s *Scheduler) EnqueueImmediateScan(ip string) {
 // 3. Immediate Reactive Vulnerability Worker (event-driven queue)
 // 4. Daily Retention Worker (90-day retention)
 // 5. Hourly Posture Snapshot Worker
+// 6. Daily Active Users Tracking Worker (24 hours)
 func (s *Scheduler) Start(ctx context.Context) {
 	log.Printf("[Scheduler] Starting background engines (Discovery: %v, Vulnerability: %v)",
 		s.cfg.DiscoveryInterval, s.cfg.VulnerabilityInterval)
 
-	s.wg.Add(5)
+	s.wg.Add(6)
 	go s.runDiscoveryWorker(ctx)
 	go s.runPeriodicVulnWorker(ctx)
 	go s.runImmediateVulnWorker(ctx)
 	go s.runRetentionWorker(ctx)
 	go s.runPostureWorker(ctx)
+	go s.runTrackingWorker(ctx)
 }
 
 // Stop waits for all background goroutines to cleanly finish.
@@ -220,7 +225,9 @@ func (s *Scheduler) runImmediateVulnWorker(ctx context.Context) {
 			go func(targetIP string) {
 				defer s.activeTargets.Delete(targetIP)
 				// Allow newly booted endpoints a short window to finish binding ports
-				time.Sleep(3 * time.Second)
+				if s.cfg != nil && s.cfg.ImmediateScanDelay > 0 {
+					time.Sleep(s.cfg.ImmediateScanDelay)
+				}
 
 				// Create an execution context bounded by ScanTimeout
 				scanCtx, cancel := context.WithTimeout(ctx, s.cfg.ScanTimeout)
@@ -522,3 +529,20 @@ func (s *Scheduler) runPostureWorker(ctx context.Context) {
 		}
 	}
 }
+
+// Tracker returns the active users tracker instance.
+func (s *Scheduler) Tracker() *tracker.Tracker {
+	return s.tracker
+}
+
+// -------------------------------------------------------------
+// Goroutine 6: Daily Active Users Tracking Worker (24h)
+// -------------------------------------------------------------
+func (s *Scheduler) runTrackingWorker(ctx context.Context) {
+	if s.tracker != nil {
+		s.tracker.Start(ctx, &s.wg)
+	} else {
+		s.wg.Done()
+	}
+}
+

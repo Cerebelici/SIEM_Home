@@ -208,3 +208,77 @@ func TestScanner_CapabilitiesAndMethods(t *testing.T) {
 		t.Errorf("expected capabilities to match")
 	}
 }
+
+func TestScanner_PortSelection(t *testing.T) {
+	validXML := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" args="nmap" start="1690000000" version="7.94">
+  <host><status state="up"/><address addr="172.28.0.10" addrtype="ipv4"/></host>
+  <runstats><finished exit="success"/></runstats>
+</nmaprun>`
+
+	tests := []struct {
+		name          string
+		scanPorts     string
+		expectedFlag  string
+		expectedValue string
+	}{
+		{
+			name:          "default to ports 1-10000",
+			scanPorts:     "",
+			expectedFlag:  "-p",
+			expectedValue: "1-10000",
+		},
+		{
+			name:          "custom port range",
+			scanPorts:     "1-10000",
+			expectedFlag:  "-p",
+			expectedValue: "1-10000",
+		},
+		{
+			name:          "custom port list with -p prefix",
+			scanPorts:     "-p 21,22,80,3000,6379",
+			expectedFlag:  "-p",
+			expectedValue: "21,22,80,3000,6379",
+		},
+		{
+			name:          "custom top ports option",
+			scanPorts:     "--top-ports 500",
+			expectedFlag:  "--top-ports",
+			expectedValue: "500",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedArgs []string
+			runner := &customRunner{
+				runFunc: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+					capturedArgs = args
+					return []byte(validXML), nil
+				},
+			}
+			cfg := &config.Config{
+				NmapPath:  "nmap",
+				ScanPorts: tc.scanPorts,
+			}
+			sc := scanner.NewWithRunner(cfg, runner)
+			_, err := sc.RunVulnerabilityScan(context.Background(), []string{"172.28.0.10"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			found := false
+			for i := 0; i < len(capturedArgs)-1; i++ {
+				if capturedArgs[i] == tc.expectedFlag && capturedArgs[i+1] == tc.expectedValue {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("expected %s %s in args, got: %v", tc.expectedFlag, tc.expectedValue, capturedArgs)
+			}
+		})
+	}
+}
+

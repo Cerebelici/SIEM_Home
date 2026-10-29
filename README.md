@@ -199,8 +199,13 @@ Key settings can be configured via environment variables:
 | `CERBERUS_HOST` | Network interface to bind | `0.0.0.0` |
 | `CERBERUS_DB_PATH` | Path to SQLite database file | `cerberus.db` |
 | `CERBERUS_SUBNET` | Target CIDR to discover (e.g. `192.168.1.0/24`) | `172.28.0.0/24` |
-| `CERBERUS_DISCOVERY_INTERVAL` | Network discovery scan frequency | `5m` |
-| `CERBERUS_VULN_INTERVAL` | Vulnerability audit scan frequency | `5m` |
+| `CERBERUS_DISCOVERY_INTERVAL` | Network discovery scan frequency | `30m` |
+| `CERBERUS_VULN_INTERVAL` | Vulnerability audit scan frequency | `10m` |
+| `CERBERUS_ENROLL_TOKEN` | Pre-shared token required for agent enrollment | *Empty* |
+| `CERBERUS_API_KEY` | Operator API key for administrative CRUD operations | *Empty* |
+| `CERBERUS_UNPRIVILEGED` | Force unprivileged TCP connect scan fallback | `true` |
+| `CERBERUS_SCAN_PORTS` | Port range or option for vulnerability audit (e.g. `1-10000`, `21,22,80,3000,6379,8080`, `--top-ports 2000`) | `--top-ports 2000` |
+| `CERBERUS_IMMEDIATE_DELAY` | Cooldown grace period before scanning newly booted hosts | `3s` |
 | `CERBERUS_SCAN_TIMEOUT` | Maximum execution timeout per scan job | `15m` |
 | `CERBERUS_NMAP_PATH` | Nmap binary to execute | `nmap` |
 | `CERBERUS_VULN_SCRIPT` | NSE script used for CVE checks | `vulners` |

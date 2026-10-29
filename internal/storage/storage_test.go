@@ -379,3 +379,52 @@ func TestTimelineStorage(t *testing.T) {
 		t.Errorf("expected 1 device in vulnTimeline, got %d", len(vulnTimeline.Devices))
 	}
 }
+
+func TestStorage_GetOrCreateClientID(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "cerberus_client_id_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	s1, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open storage 1: %v", err)
+	}
+
+	ctx := context.Background()
+	id1, err := s1.GetOrCreateClientID(ctx)
+	if err != nil {
+		t.Fatalf("GetOrCreateClientID error: %v", err)
+	}
+	if id1 == "" {
+		t.Fatal("expected non-empty client ID")
+	}
+
+	// Calling again on same storage returns same ID
+	id2, err := s1.GetOrCreateClientID(ctx)
+	if err != nil {
+		t.Fatalf("second call error: %v", err)
+	}
+	if id1 != id2 {
+		t.Errorf("expected same client ID on repeated call, got %s vs %s", id1, id2)
+	}
+	s1.Close()
+
+	// Re-open same database file with new Storage instance
+	s2, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open storage 2: %v", err)
+	}
+	defer s2.Close()
+
+	id3, err := s2.GetOrCreateClientID(ctx)
+	if err != nil {
+		t.Fatalf("call on re-opened DB error: %v", err)
+	}
+	if id1 != id3 {
+		t.Errorf("expected persisted client ID across DB re-open, got %s vs %s", id1, id3)
+	}
+}
+
